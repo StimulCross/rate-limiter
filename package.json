@@ -1,0 +1,92 @@
+{
+	"name": "@stimulcross/rate-limiter",
+	"version": "0.0.1",
+	"description": "A collection of client-side rate limiters for Node.js and browsers.",
+	"engines": {
+		"node": ">=20"
+	},
+	"packageManager": "pnpm@10.30.3",
+	"type": "module",
+	"main": "./lib/index.js",
+	"types": "./lib/index.d.ts",
+	"exports": {
+		".": {
+			"types": "./lib/index.d.ts",
+			"default": "./lib/index.js"
+		},
+		"./fixed-window": {
+			"types": "./lib/limiters/fixed-window/index.d.ts",
+			"default": "./lib/limiters/fixed-window/index.js"
+		},
+		"./sliding-window-counter": {
+			"types": "./lib/limiters/sliding-window-counter/index.d.ts",
+			"default": "./lib/limiters/sliding-window-counter/index.js"
+		},
+		"./sliding-window-log": {
+			"types": "./lib/limiters/sliding-window-log/index.d.ts",
+			"default": "./lib/limiters/sliding-window-log/index.js"
+		},
+		"./token-bucket": {
+			"types": "./lib/limiters/token-bucket/index.d.ts",
+			"default": "./lib/limiters/token-bucket/index.js"
+		},
+		"./leaky-bucket": {
+			"types": "./lib/limiters/leaky-bucket/index.d.ts",
+			"default": "./lib/limiters/leaky-bucket/index.js"
+		},
+		"./generic-cell": {
+			"types": "./lib/limiters/generic-cell/index.d.ts",
+			"default": "./lib/limiters/generic-cell/index.js"
+		},
+		"./http-response-based": {
+			"types": "./lib/limiters/http-response-based/index.d.ts",
+			"default": "./lib/limiters/http-response-based/index.js"
+		}
+	},
+	"scripts": {
+		"build": "tsc -p tsconfig.json",
+		"rebuild": "pnpm run clean && pnpm run build",
+		"clean": "del-cli lib *.tsbuildinfo",
+		"lint": "eslint src tests",
+		"lint:fix": "eslint src tests --fix",
+		"format:check": "prettier --config \"prettier.config.cjs\" --check src tests",
+		"format:fix": "prettier --config \"prettier.config.cjs\" --write src tests",
+		"check-types": "tsc -p tsconfig.json --noEmit",
+		"prepare": "husky",
+		"preversion": "pnpm run format:check && pnpm run lint && pnpm run test && pnpm run rebuild",
+		"postversion": "pnpm i",
+		"prepublishOnly": "pnpm run format:check && pnpm run lint && pnpm run test && pnpm run rebuild",
+		"test": "vitest run",
+		"test:cov": "vitest run --coverage",
+		"test:watch": "vitest watch",
+		"test:verbose": "vitest --run --reporter verbose --logHeapUsage",
+		"test:watch:cov": "vitest watch --coverage"
+	},
+	"dependencies": {
+		"@stimulcross/ds-binary-heap": "^0.1.0",
+		"@stimulcross/ds-deque": "^0.1.0",
+		"@stimulcross/ds-policy-priority-queue": "^0.2.2",
+		"@stimulcross/logger": "^8.0.0"
+	},
+	"devDependencies": {
+		"@commitlint/cli": "^20.4.4",
+		"@leancodepl/resolve-eslint-flat-config": "^9.7.4",
+		"@stimulcross/commitlint-config": "^2.0.0",
+		"@stimulcross/eslint-config-node": "^2.0.0",
+		"@stimulcross/eslint-config-typescript": "^2.0.0",
+		"@stimulcross/prettier-config": "^2.0.0",
+		"@types/node": "^25.5.0",
+		"@vitest/coverage-v8": "^4.1.0",
+		"del-cli": "^7.0.0",
+		"eslint": "^9.39.4",
+		"globals": "^17.4.0",
+		"husky": "^9.1.7",
+		"lint-staged": "^16.4.0",
+		"prettier": "^3.8.1",
+		"typescript": "^5.9.3",
+		"vitest": "^4.1.0"
+	},
+	"publishConfig": {
+		"access": "public"
+	}
+}
