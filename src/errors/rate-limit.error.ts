@@ -1,3 +1,4 @@
+import { CustomError } from './custom.error.js';
 import { RateLimitErrorCode } from '../enums/rate-limit-error-code.js';
 
 export interface RateLimitErrorPlainObject extends Error {
@@ -19,7 +20,7 @@ export interface RateLimitErrorPlainObject extends Error {
  * - `DESTROYED` - When the task is destroyed due to the rate limiter's `clear()` or `destroy()` methods.
  * - `CANCELLED` - When the task is cancelled using an abort signal.
  */
-export class RateLimitError extends Error {
+export class RateLimitError extends CustomError {
 	private readonly _code: RateLimitErrorCode;
 	private readonly _retryAt: number | null;
 
