@@ -124,9 +124,9 @@ export abstract class AbstractRateLimiter<
 		ctx: ExecutionContext,
 		expiresAt?: number,
 	): Promise<T> {
-		await this._ensureCanExecute(ctx);
-
 		try {
+			await this._ensureCanExecute(ctx);
+
 			return await this._executor.execute<T>(fn, runAt, {
 				id: ctx.id,
 				key: ctx.key,
