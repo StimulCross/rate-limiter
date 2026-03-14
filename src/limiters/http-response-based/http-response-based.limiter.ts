@@ -74,7 +74,7 @@ export class HttpResponseBasedLimiter<TResponse> implements RateLimiter<HttpResp
 	private _isDestroyed = false;
 
 	constructor(options: HttpResponseBasedLimiterOptions<TResponse>) {
-		this._logger = createLogger(new.target.name, { minLevel: 'WARNING', ...options.loggerOptions });
+		this._logger = createLogger({ context: new.target.name, minLevel: 'WARNING', ...options.loggerOptions });
 		this._clock = options.clock ?? defaultClock;
 		this._store = options.store ?? new InMemoryStateStore<HttpResponseBasedLimiterState>(this._clock);
 		this._executor = new RateLimiterExecutor(this._logger, this._clock, options.queue);

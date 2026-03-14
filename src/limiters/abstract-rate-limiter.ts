@@ -47,7 +47,7 @@ export abstract class AbstractRateLimiter<
 	protected abstract readonly _policy: RateLimitPolicy<TState, TStatus>;
 
 	protected constructor(options?: RateLimiterOptions<TState>) {
-		this._logger = createLogger(new.target.name, { minLevel: 'WARNING', ...options?.loggerOptions });
+		this._logger = createLogger({ context: new.target.name, minLevel: 'WARNING', ...options?.loggerOptions });
 		this._clock = options?.clock ?? defaultClock;
 		this._store = options?.store ?? new InMemoryStateStore<TState>(this._clock);
 		this._executor = new RateLimiterExecutor(this._logger, this._clock, options?.queue);

@@ -75,7 +75,7 @@ export interface RateLimiterOptions<TState = unknown> {
 	/**
 	 * Logger options.
 	 */
-	loggerOptions?: Omit<LoggerOptions, 'context'>;
+	loggerOptions?: Partial<LoggerOptions>;
 
 	/**
 	 * Queue settings.
