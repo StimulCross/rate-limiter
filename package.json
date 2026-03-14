@@ -94,7 +94,8 @@
 		"LICENSE",
 		"README.md",
 		"lib",
-		"!lib/**/*.d.ts.map"
+		"!lib/**/*.d.ts.map",
+		"!lib/**/*.js.map"
 	],
 	"publishConfig": {
 		"access": "public"

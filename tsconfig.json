@@ -3,12 +3,24 @@
 		"target": "ES2022",
 		"module": "NodeNext",
 		"moduleResolution": "Node16",
+
 		"lib": ["ES2022", "ES2024.Promise"],
-		"esModuleInterop": true,
-		"forceConsistentCasingInFileNames": true,
+
+		"outDir": "lib",
+
 		"strict": true,
-		"skipLibCheck": true,
-		"outDir": "lib"
+		"noImplicitReturns": true,
+		"isolatedModules": true,
+		"importHelpers": true,
+
+		"forceConsistentCasingInFileNames": true,
+		"sourceMap": true,
+
+		"declaration": true,
+		"declarationMap": true,
+
+		"rootDir": "src",
+		"skipLibCheck": true
 	},
 	"include": ["src"]
 }
