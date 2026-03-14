@@ -3,12 +3,11 @@ export abstract class CustomError extends Error {
 	protected constructor(message: string) {
 		super(message);
 
-		Object.setPrototypeOf(this, new.target.prototype);
-		// eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
-		Error.captureStackTrace?.(this, new.target.constructor);
-	}
+		Reflect.setPrototypeOf(this, new.target.prototype);
 
-	public get name(): string {
-		return this.constructor.name;
+		this.name = new.target.name;
+
+		// eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
+		Error.captureStackTrace?.(this, new.target);
 	}
 }
