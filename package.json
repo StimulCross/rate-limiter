@@ -2,11 +2,15 @@
 	"name": "@stimulcross/rate-limiter",
 	"version": "0.0.1",
 	"description": "A collection of client-side rate limiters for Node.js and browsers.",
+	"type": "module",
+	"packageManager": "pnpm@10.30.3",
 	"engines": {
 		"node": ">=20"
 	},
-	"packageManager": "pnpm@10.30.3",
-	"type": "module",
+	"sideEffects": false,
+	"repository": "github:stimulcross/logger",
+	"author": "Stimul Cross <stimulcross@gmail.com>",
+	"license": "MIT",
 	"main": "./lib/index.js",
 	"types": "./lib/index.d.ts",
 	"exports": {
@@ -86,6 +90,12 @@
 		"typescript": "^5.9.3",
 		"vitest": "^4.1.0"
 	},
+	"files": [
+		"LICENSE",
+		"README.md",
+		"lib",
+		"!lib/**/*.d.ts.map"
+	],
 	"publishConfig": {
 		"access": "public"
 	}
