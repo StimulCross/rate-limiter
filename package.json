@@ -76,7 +76,6 @@
 		"@commitlint/cli": "^20.4.4",
 		"@leancodepl/resolve-eslint-flat-config": "^9.7.4",
 		"@stimulcross/commitlint-config": "^2.0.0",
-		"@stimulcross/eslint-config-node": "^2.0.0",
 		"@stimulcross/eslint-config-typescript": "^2.0.0",
 		"@stimulcross/prettier-config": "^2.0.0",
 		"@types/node": "^25.5.0",
