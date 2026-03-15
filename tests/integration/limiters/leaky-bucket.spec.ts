@@ -1,9 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { type Clock } from '../../../src/core/clock.js';
-import { RateLimitErrorCode } from '../../../src/enums/rate-limit-error-code.js';
-import { RateLimiterDestroyedError } from '../../../src/errors/rate-limiter-destroyed.error.js';
-import { LeakyBucketLimiter } from '../../../src/limiters/leaky-bucket/leaky-bucket.limiter.js';
-import { type LeakyBucketState } from '../../../src/limiters/leaky-bucket/leaky-bucket.state.js';
+import { type Clock, RateLimiterDestroyedError, RateLimitErrorCode } from '../../../src/index.js';
+import { LeakyBucketLimiter, type LeakyBucketState } from '../../../src/limiters/leaky-bucket/index.js';
 import { InMemoryStateStore } from '../../../src/runtime/in-memory-state-store.js';
 
 describe('LeakyBucketLimiter (Integration)', () => {
@@ -267,6 +264,40 @@ describe('LeakyBucketLimiter (Integration)', () => {
 
 			await expect(pD).resolves.toBe('D');
 			expect(spyD).toHaveBeenCalledOnce();
+		});
+
+		it('should force enqueue task even if queue is full when shouldForceEnqueue is true', async () => {
+			const limiter = new LeakyBucketLimiter({
+				limitBehavior: 'enqueue',
+				capacity: 1,
+				leakRate: 10,
+				queue: { capacity: 1 },
+				clock,
+				store,
+			});
+
+			void limiter.run(() => {});
+
+			const taskA = vi.fn().mockResolvedValue('A');
+			const taskB = vi.fn().mockResolvedValue('B');
+			const taskC = vi.fn().mockResolvedValue('C');
+
+			const pA = limiter.run(taskA, { id: 'A' });
+			const pB = limiter.run(taskB, { id: 'B', shouldForceEnqueue: false });
+
+			await expect(pB).rejects.toMatchObject({ code: RateLimitErrorCode.QueueOverflow });
+
+			const pC = limiter.run(taskC, { id: 'C', shouldForceEnqueue: true });
+
+			await vi.advanceTimersByTimeAsync(100);
+
+			expect(taskA).toHaveBeenCalledOnce();
+			await expect(pA).resolves.toBe('A');
+
+			await vi.advanceTimersByTimeAsync(100);
+
+			expect(taskC).toHaveBeenCalledOnce();
+			await expect(pC).resolves.toBe('C');
 		});
 	});
 

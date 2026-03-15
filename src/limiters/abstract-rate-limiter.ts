@@ -27,6 +27,7 @@ export interface ExecutionContext {
 	readonly priority?: Priority;
 	readonly signal?: AbortSignal;
 	readonly maxWaitMs?: number;
+	readonly shouldForceEnqueue?: boolean;
 }
 
 /** @internal */
@@ -69,6 +70,7 @@ export abstract class AbstractRateLimiter<
 			priority: options.priority,
 			signal: options.signal,
 			maxWaitMs: options.maxWaitMs,
+			shouldForceEnqueue: options.shouldForceEnqueue,
 		};
 
 		await this._ensureCanExecute(ctx);
@@ -133,6 +135,7 @@ export abstract class AbstractRateLimiter<
 				priority: ctx.priority,
 				signal: ctx.signal,
 				expiresAt,
+				shouldForceEnqueue: ctx.shouldForceEnqueue,
 			});
 		} catch (e) {
 			if (this._shouldRevert(e)) {
@@ -168,7 +171,7 @@ export abstract class AbstractRateLimiter<
 	}
 
 	private async _ensureCanExecute(ctx: ExecutionContext): Promise<void> {
-		if (this._executor.isQueueFull) {
+		if (this._executor.isQueueFull && !ctx.shouldForceEnqueue) {
 			this._shouldPrintDebug &&
 				this._logger.debug(
 					`[DROP OVERFLOW] [id: ${ctx.id}, key: ${ctx.key}] - prt: ${ctx.priority ?? Priority.Normal} | q: ${this._executor.queueSize}/${this._executor.queueCapacity}`,

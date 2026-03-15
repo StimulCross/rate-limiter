@@ -55,4 +55,11 @@ export interface RateLimiterRunOptions {
 	 * @default Infinity
 	 */
 	maxWaitMs?: number;
+
+	/**
+	 * Forces the task to be enqueued even if the queue has reached maximum capacity.
+	 *
+	 * @default false
+	 */
+	shouldForceEnqueue?: boolean;
 }

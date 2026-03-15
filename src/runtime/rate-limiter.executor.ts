@@ -15,6 +15,7 @@ export interface RateLimiterExecutionOptions {
 	expiresAt?: number;
 	priority?: number;
 	signal?: AbortSignal;
+	shouldForceEnqueue?: boolean;
 }
 
 /** @internal */
@@ -80,8 +81,18 @@ export class RateLimiterExecutor {
 				this._drain();
 			});
 
+		const isEnqueued = this._queue.enqueue(task, task.priority, options.shouldForceEnqueue);
+
+		if (!isEnqueued) {
+			this._shouldPrintDebug &&
+				this._logger.debug(
+					`[DROP OVERFLOW] [id: ${options.id}, key: ${options.key}] - ${this._getStateDebugString(task.priority)}`,
+				);
+
+			throw new RateLimitError(RateLimitErrorCode.QueueOverflow);
+		}
+
 		this._tickets.add(runAt);
-		this._queue.enqueue(task, task.priority);
 
 		if (task.expiresAt !== undefined) {
 			this._expiryHeap.push(task);

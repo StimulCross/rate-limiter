@@ -120,6 +120,49 @@ describe('RateLimiterExecutor', () => {
 
 			expect(executionOrder).toEqual([2, 3, 1]);
 		});
+
+		it('should throw an overflow error if the queue is full', async () => {
+			executor = new RateLimiterExecutor(logger, clock, { capacity: 1 });
+
+			const task1 = vi.fn().mockResolvedValue('result');
+			const task2 = vi.fn().mockResolvedValue('result');
+
+			const promise1 = executor.execute(task1, clock.now() + 100, { id: 'task-1', key: 'key-1' });
+			const promise2 = executor.execute(task2, clock.now() + 200, { id: 'task-2', key: 'key-2' });
+			promise2.catch(() => {});
+
+			await vi.advanceTimersByTimeAsync(100);
+
+			expect(task1).toHaveBeenCalledOnce();
+			await expect(promise1).resolves.toBe('result');
+
+			expect(task2).not.toHaveBeenCalled();
+			await expect(promise2).rejects.toMatchObject({ code: RateLimitErrorCode.QueueOverflow });
+		});
+
+		it('should force enqueue task even if queue is full when shouldForceEnqueue is true', async () => {
+			executor = new RateLimiterExecutor(logger, clock, { capacity: 1 });
+
+			const task1 = vi.fn().mockResolvedValue('result');
+			const task2 = vi.fn().mockResolvedValue('result');
+
+			const promise1 = executor.execute(task1, clock.now() + 100, { id: 'task-1', key: 'key-1' });
+			const promise2 = executor.execute(task2, clock.now() + 200, {
+				id: 'task-2',
+				key: 'key-2',
+				shouldForceEnqueue: true,
+			});
+
+			await vi.advanceTimersByTimeAsync(100);
+
+			expect(task1).toHaveBeenCalledOnce();
+			await expect(promise1).resolves.toBe('result');
+
+			await vi.advanceTimersByTimeAsync(100);
+
+			expect(task2).toHaveBeenCalledOnce();
+			await expect(promise2).resolves.toBe('result');
+		});
 	});
 
 	describe('Concurrency', () => {
