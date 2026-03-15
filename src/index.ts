@@ -1,3 +1,4 @@
+export { Priority, type SelectionPolicy, type SelectionPolicyCandidate } from '@stimulcross/ds-policy-priority-queue';
 export type { Clock } from './core/clock.js';
 export type { StateStorage } from './core/state-storage.js';
 export type { RateLimiter } from './core/rate-limiter.js';
