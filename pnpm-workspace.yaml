@@ -1,0 +1,10 @@
+minimumReleaseAgeExcludePrune: true
+minimumReleaseAgeExclude:
+  - '@stimulcross/ds-binary-heap@0.2.0'
+  - '@stimulcross/eslint-config@0.1.2'
+
+trustPolicy: no-downgrade
+shellEmulator: true
+
+allowBuilds:
+  unrs-resolver: true

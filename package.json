@@ -1,18 +1,19 @@
 {
 	"name": "@stimulcross/rate-limiter",
-	"version": "0.0.8",
-	"description": "A collection of client-side rate limiters for Node.js and browsers.",
 	"type": "module",
-	"packageManager": "pnpm@10.30.3",
-	"engines": {
-		"node": ">=20"
+	"version": "0.0.8",
+	"packageManager": "pnpm@12.21.0",
+	"publishConfig": {
+		"access": "public"
 	},
-	"sideEffects": false,
-	"repository": "github:stimulcross/logger",
+	"description": "A collection of client-side rate limiters for Node.js and browsers.",
 	"author": "Stimul Cross <stimulcross@gmail.com>",
 	"license": "MIT",
-	"main": "./lib/index.js",
-	"types": "./lib/index.d.ts",
+	"repository": "github:stimulcross/rate-limiter",
+	"sideEffects": false,
+	"nano-staged": {
+		"*": "eslint --fix"
+	},
 	"exports": {
 		".": {
 			"types": "./lib/index.d.ts",
@@ -22,44 +23,56 @@
 			"types": "./lib/limiters/fixed-window/index.d.ts",
 			"default": "./lib/limiters/fixed-window/index.js"
 		},
-		"./sliding-window-counter": {
-			"types": "./lib/limiters/sliding-window-counter/index.d.ts",
-			"default": "./lib/limiters/sliding-window-counter/index.js"
+		"./token-bucket": {
+			"types": "./lib/limiters/token-bucket/index.d.ts",
+			"default": "./lib/limiters/token-bucket/index.js"
 		},
 		"./sliding-window-log": {
 			"types": "./lib/limiters/sliding-window-log/index.d.ts",
 			"default": "./lib/limiters/sliding-window-log/index.js"
 		},
-		"./token-bucket": {
-			"types": "./lib/limiters/token-bucket/index.d.ts",
-			"default": "./lib/limiters/token-bucket/index.js"
-		},
-		"./leaky-bucket": {
-			"types": "./lib/limiters/leaky-bucket/index.d.ts",
-			"default": "./lib/limiters/leaky-bucket/index.js"
+		"./sliding-window-counter": {
+			"types": "./lib/limiters/sliding-window-counter/index.d.ts",
+			"default": "./lib/limiters/sliding-window-counter/index.js"
 		},
 		"./generic-cell": {
 			"types": "./lib/limiters/generic-cell/index.d.ts",
 			"default": "./lib/limiters/generic-cell/index.js"
+		},
+		"./leaky-bucket": {
+			"types": "./lib/limiters/leaky-bucket/index.d.ts",
+			"default": "./lib/limiters/leaky-bucket/index.js"
 		},
 		"./http-response-based": {
 			"types": "./lib/limiters/http-response-based/index.d.ts",
 			"default": "./lib/limiters/http-response-based/index.js"
 		}
 	},
+	"main": "./lib/index.js",
+	"types": "./lib/index.d.ts",
+	"files": [
+		"LICENSE",
+		"README.md",
+		"lib",
+		"src"
+	],
+	"engines": {
+		"node": ">=22.13.0"
+	},
 	"scripts": {
-		"build": "tsc -p tsconfig.json",
+		"build": "tsc -p tsconfig.build.json",
 		"rebuild": "pnpm run clean && pnpm run build",
 		"clean": "del-cli lib *.tsbuildinfo",
-		"lint": "eslint src tests",
-		"lint:fix": "eslint src tests --fix",
-		"format:check": "prettier --config \"prettier.config.cjs\" --check src tests",
-		"format:fix": "prettier --config \"prettier.config.cjs\" --write src tests",
-		"check-types": "tsc -p tsconfig.json --noEmit",
+		"lint": "eslint .",
+		"lint:fix": "eslint . --fix",
+		"playground": "pnpm run build && node playground/run.js",
+		"playground:stream": "pnpm run playground stream",
+		"check-types": "tsc -p tsconfig.json",
 		"prepare": "husky",
-		"preversion": "pnpm run format:check && pnpm run lint && pnpm run test && pnpm run rebuild",
+		"preversion": "pnpm run lint && pnpm run test && pnpm run rebuild",
 		"postversion": "pnpm i",
-		"prepublishOnly": "pnpm run format:check && pnpm run lint && pnpm run test && pnpm run rebuild",
+		"prepublishOnly": "pnpm run lint && pnpm run test",
+		"prepack": "pnpm run rebuild",
 		"test": "vitest run",
 		"test:cov": "vitest run --coverage",
 		"test:watch": "vitest watch",
@@ -67,36 +80,22 @@
 		"test:watch:cov": "vitest watch --coverage"
 	},
 	"dependencies": {
-		"@stimulcross/ds-binary-heap": "^0.1.0",
+		"@stimulcross/ds-binary-heap": "0.2.0",
 		"@stimulcross/ds-deque": "^0.1.0",
-		"@stimulcross/ds-policy-priority-queue": "^0.2.2",
-		"@stimulcross/logger": "^8.0.0"
+		"@stimulcross/logger": "^9.0.0"
 	},
 	"devDependencies": {
-		"@commitlint/cli": "^20.4.4",
-		"@leancodepl/resolve-eslint-flat-config": "^9.7.4",
+		"@commitlint/cli": "^21.2.4",
 		"@stimulcross/commitlint-config": "^2.0.0",
-		"@stimulcross/eslint-config-typescript": "^2.0.0",
-		"@stimulcross/prettier-config": "^2.0.0",
-		"@types/node": "^25.5.0",
-		"@vitest/coverage-v8": "^4.1.0",
-		"del-cli": "^7.0.0",
-		"eslint": "^9.39.4",
-		"globals": "^17.4.0",
+		"@stimulcross/eslint-config": "^0.1.2",
+		"@types/node": "^26.6.6",
+		"@vitest/coverage-v8": "^5.1.1",
+		"del-cli": "^8.0.1",
+		"eslint": "^10.15.0",
+		"eslint-plugin-format": "^2.0.1",
 		"husky": "^9.1.7",
-		"lint-staged": "^16.4.0",
-		"prettier": "^3.8.1",
-		"typescript": "^5.9.3",
-		"vitest": "^4.1.0"
-	},
-	"files": [
-		"LICENSE",
-		"README.md",
-		"lib",
-		"!lib/**/*.d.ts.map",
-		"!lib/**/*.js.map"
-	],
-	"publishConfig": {
-		"access": "public"
+		"nano-staged": "^1.0.2",
+		"typescript": "^6.0.3",
+		"vitest": "^5.1.1"
 	}
 }

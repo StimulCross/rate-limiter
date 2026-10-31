@@ -1,4 +1,4 @@
-/tmp
+/tmp/
 /out-tsc
 /lib
 /node_modules
@@ -10,6 +10,7 @@ yarn-error.log*
 /.idea
 .vscode/*
 /coverage
-/playground
 package-lock.json
 .DS_Store
+
+*.tsbuildinfo

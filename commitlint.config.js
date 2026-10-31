@@ -3,6 +3,6 @@ export default {
 	rules: {
 		'body-max-line-length': [2, 'always', 500],
 		'footer-max-line-length': [2, 'always', 500],
-	}
+	},
 
-};
+}
