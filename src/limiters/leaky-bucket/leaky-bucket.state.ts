@@ -1,9 +1,5 @@
-/**
- * Leaky Bucket rate limiter state.
- *
- * When using a distributed state store, make sure it properly serializes and deserializes the state.
- */
+/** @internal */
 export interface LeakyBucketState {
-	level: number;
-	lastUpdate: number;
+	readonly lastStartedAt: number
+	readonly readyAt: number
 }

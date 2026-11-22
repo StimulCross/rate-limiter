@@ -1,209 +1,151 @@
-import { describe, it, expect } from 'vitest';
-import { InvalidCostError } from '../../../src/index.js';
-import { SlidingWindowCounterPolicy } from '../../../src/limiters/sliding-window-counter/sliding-window-counter.policy.js';
+import { describe, expect, it } from 'vitest'
+import { SlidingWindowCounterPolicy } from '../../../src/limiters/sliding-window-counter/sliding-window-counter.policy.js'
 
 describe('SlidingWindowCounterPolicy', () => {
-	describe('Constructor and getters', () => {
-		it('should initialize with valid parameters', () => {
-			const policy = new SlidingWindowCounterPolicy(10, 1000);
-			expect(policy.limit).toBe(10);
-			expect(policy.windowMs).toBe(1000);
-		});
+	it.each([
+		{ limit: 0, windowMs: 1000 },
+		{ limit: 1.5, windowMs: 1000 },
+		{ limit: 2 ** 53, windowMs: 1000 },
+		{ limit: 1, windowMs: 0 },
+		{ limit: 1, windowMs: Infinity },
+		{ limit: 1, windowMs: 1000, offsetMs: 0.5 },
+		{ limit: 1, windowMs: 1000, offsetMs: 2 ** 53 },
+	])('should reject invalid options %j', options => {
+		expect(() => new SlidingWindowCounterPolicy(options)).toThrow(RangeError)
+	})
 
-		it('should throw an error for invalid limit', () => {
-			expect(() => new SlidingWindowCounterPolicy(-5, 1000)).toThrow(/Invalid limit/u);
-			expect(() => new SlidingWindowCounterPolicy(1.5, 1000)).toThrow(/Invalid limit/u);
-			expect(() => new SlidingWindowCounterPolicy(Infinity, 1000)).toThrow(/Invalid limit/u);
-		});
+	it.each([
+		{ offsetMs: 0, start: 990, boundary: 1000 },
+		{ offsetMs: 250, start: -750.5, boundary: -750 },
+	])('should project adjacent and skipped windows from a start at $start', ({ offsetMs, start, boundary }) => {
+		const policy = new SlidingWindowCounterPolicy({ limit: 5, windowMs: 1000, offsetMs })
+		const state = policy.charge(policy.charge(undefined, start), start)
 
-		it('should throw an error for invalid windowMs', () => {
-			expect(() => new SlidingWindowCounterPolicy(10, 0)).toThrow(/Invalid windowMs/u);
-			expect(() => new SlidingWindowCounterPolicy(10, -100)).toThrow(/Invalid windowMs/u);
-			expect(() => new SlidingWindowCounterPolicy(10, 100.5)).toThrow(/Invalid windowMs/u);
-			expect(() => new SlidingWindowCounterPolicy(10, Number.NaN)).toThrow(/Invalid windowMs/u);
-		});
+		expect(policy.getStatus(state, start)).toMatchObject({
+			windowStart: boundary - 1000,
+			currentCount: 2,
+			previousCount: 0,
+		})
 
-		it('should return correct initial state', () => {
-			const policy = new SlidingWindowCounterPolicy(5, 1000);
-			expect(policy.getInitialState()).toEqual({ windowStart: 0, currentCount: 0, previousCount: 0 });
-		});
-	});
+		expect(policy.getStatus(state, boundary)).toEqual({
+			limit: 5,
+			windowMs: 1000,
+			windowStart: boundary,
+			currentCount: 0,
+			previousCount: 2,
+			estimatedCount: 2,
+			remaining: 3,
+			nextAvailableAt: boundary,
+		})
 
-	describe('Get Status', () => {
-		const policy = new SlidingWindowCounterPolicy(10, 1000);
+		expect(policy.getStatus(state, boundary + 1000)).toMatchObject({
+			windowStart: boundary + 1000,
+			currentCount: 0,
+			previousCount: 0,
+			estimatedCount: 0,
+			remaining: 5,
+		})
+	})
 
-		it('should return correct status for empty state', () => {
-			const state = policy.getInitialState();
-			const status = policy.getStatus(state, 500);
+	it('should block an estimate of 4.5 until it reaches four', () => {
+		const policy = new SlidingWindowCounterPolicy({ limit: 5, windowMs: 1000 })
+		let state = policy.charge(undefined, 990)
 
-			expect(status.limit).toBe(10);
-			expect(status.windowMs).toBe(1000);
-			expect(status.estimatedCount).toBe(0);
-			expect(status.remaining).toBe(10);
-			expect(status.nextAvailableAt).toBe(500);
-			expect(status.resetAt).toBe(500);
-		});
+		for (let count = 1; count < 5; count++)
+			state = policy.charge(state, 990)
 
-		it('should correctly approximate count based on time into window', () => {
-			const state = { windowStart: 0, previousCount: 10, currentCount: 2 };
-			const status = policy.getStatus(state, 500);
+		expect(policy.getStatus(state, 1100)).toMatchObject({ estimatedCount: 4.5, remaining: 0, nextAvailableAt: 1200 })
+		expect(policy.check(state, 1199)).toBe(1200)
+		expect(policy.check(state, 1200)).toBeUndefined()
+		expect(policy.getStatus(state, 1200)).toMatchObject({ estimatedCount: 4, remaining: 1, nextAvailableAt: 1200 })
 
-			expect(status.estimatedCount).toBe(7);
-			expect(status.remaining).toBe(3);
-			expect(status.resetAt).toBe(2000);
-		});
+		state = policy.charge(state, 1200)
+		expect(policy.getStatus(state, 1200)).toMatchObject({ currentCount: 1, previousCount: 5, nextAvailableAt: 1400 })
+	})
 
-		it('should calculate correct nextAvailableAt within the current window', () => {
-			const state = { windowStart: 0, previousCount: 10, currentCount: 0 };
-			const status = policy.getStatus(state, 100);
+	it('should remain blocked through rollover when the limit is one', () => {
+		const policy = new SlidingWindowCounterPolicy({ limit: 1, windowMs: 1000 })
+		const state = policy.charge(undefined, 990)
 
-			expect(status.estimatedCount).toBe(9);
-			expect(status.nextAvailableAt).toBe(100);
-			expect(status.resetAt).toBe(1000);
-		});
-	});
+		expect(policy.getStatus(state, 1000)).toMatchObject({ currentCount: 0, previousCount: 1, nextAvailableAt: 2000 })
+		expect(policy.check(state, 1999)).toBe(2000)
+		expect(policy.check(state, 2000)).toBeUndefined()
+	})
 
-	describe('Evaluate', () => {
-		describe('Immediate execution (Same Window)', () => {
-			const policy = new SlidingWindowCounterPolicy(5, 1000);
+	it('should carry only the latest count into the previous window on a second rollover', () => {
+		const policy = new SlidingWindowCounterPolicy({ limit: 3, windowMs: 1000 })
+		let state = policy.charge(policy.charge(undefined, 0), 0)
 
-			it('should allow request when within limit', () => {
-				const state = policy.getInitialState();
-				const result = policy.evaluate(state, 500, 1);
+		expect(policy.check(state, 1000)).toBeUndefined()
+		state = policy.charge(state, 1000)
+		expect(policy.check(state, 1499)).toBe(1500)
+		expect(policy.check(state, 1500)).toBeUndefined()
+		state = policy.charge(state, 1500)
 
-				expect(result.decision).toEqual({ kind: 'allow' });
-				expect(result.nextState).toEqual({ windowStart: 0, previousCount: 0, currentCount: 1 });
-			});
+		expect(policy.check(state, 1999)).toBe(2000)
+		expect(policy.check(state, 2000)).toBeUndefined()
+		state = policy.charge(state, 2000)
 
-			it('should allow request with cost > 1 if within limit', () => {
-				const state = policy.getInitialState();
-				const result = policy.evaluate(state, 500, 3);
+		expect(policy.getStatus(state, 2000)).toMatchObject({
+			windowStart: 2000,
+			currentCount: 1,
+			previousCount: 2,
+			estimatedCount: 3,
+			remaining: 0,
+			nextAvailableAt: 2500,
+		})
+	})
 
-				expect(result.decision).toEqual({ kind: 'allow' });
-				expect(result.nextState.currentCount).toBe(3);
-			});
+	it.each([
+		{ boundary: 1000, ulp: 2 ** -42 },
+		{ boundary: -1000, ulp: 2 ** -43 },
+	])('should return the first representable time after the rational threshold from $boundary', ({ boundary, ulp }) => {
+		const policy = new SlidingWindowCounterPolicy({ limit: 3, windowMs: 1000 })
+		const start = boundary - 10
+		const state = policy.charge(policy.charge(policy.charge(undefined, start), start), start)
+		const { nextAvailableAt } = policy.getStatus(state, boundary)
+		const predecessor = nextAvailableAt - ulp
 
-			it('should deny request when limit is exceeded', () => {
-				const state = { windowStart: 0, currentCount: 5, previousCount: 0 };
-				const result = policy.evaluate(state, 500, 1);
+		// Convert the timestamps to integer multiples of their ULP and test 3 * (t - boundary) >= 1000.
+		const reference = (time: number) => 3n * (BigInt(time / ulp) - BigInt(boundary / ulp)) >= BigInt(1000 / ulp)
 
-				expect(result.decision).toEqual({ kind: 'deny', retryAt: 1001 });
-				expect(result.nextState).toEqual(state);
+		expect(reference(predecessor)).toBe(false)
+		expect(reference(nextAvailableAt)).toBe(true)
+		expect(policy.check(state, predecessor)).toBe(nextAvailableAt)
+		expect(policy.check(state, nextAvailableAt)).toBeUndefined()
+	})
 
-				const result2 = policy.evaluate(state, 1001, 1);
+	it('should compute remaining before rounding a displayed estimate to four', () => {
+		const policy = new SlidingWindowCounterPolicy({ limit: 5, windowMs: 1 })
+		let state = policy.charge(undefined, -0.5)
 
-				expect(result2.decision).toEqual({ kind: 'allow' });
-			});
+		for (let count = 1; count < 5; count++)
+			state = policy.charge(state, -0.5)
 
-			it('should deny request if cost itself exceeds limit', () => {
-				const state = policy.getInitialState();
-				expect(() => policy.evaluate(state, 500, 6)).toThrow(InvalidCostError);
-			});
-		});
+		expect(policy.getStatus(state, 0.2 - 2 ** -55)).toMatchObject({
+			estimatedCount: 4,
+			remaining: 0,
+			nextAvailableAt: 0.2,
+		})
 
-		describe('Window Transitions and Approximation', () => {
-			const policy = new SlidingWindowCounterPolicy(10, 1000);
+		expect(policy.getStatus(state, 0.2)).toMatchObject({ estimatedCount: 4, remaining: 1 })
+	})
 
-			it('should shift current window to previous when exactly one window passes', () => {
-				const state = { windowStart: 0, currentCount: 10, previousCount: 0 };
-				const result = policy.evaluate(state, 1000, 1);
+	it('should classify windows exactly when the grid index exceeds the safe integer range', () => {
+		const policy = new SlidingWindowCounterPolicy({ limit: 1, windowMs: 0.5, offsetMs: -1 })
+		const start = 2 ** 52
+		const state = policy.charge(undefined, start)
 
-				expect(result.decision.kind).toBe('deny');
-				expect(result.nextState).toEqual({ windowStart: 1000, currentCount: 0, previousCount: 10 });
-			});
+		expect(policy.check(state, start)).toBe(start + 1)
+		expect(policy.getStatus(state, start + 1)).toMatchObject({ currentCount: 0, previousCount: 0, remaining: 1 })
+	})
 
-			it('should approximate weight correctly based on time into current window', () => {
-				const state = { windowStart: 0, currentCount: 10, previousCount: 0 };
-				const allowedResult = policy.evaluate(state, 1250, 3);
+	it('should handle subnormal durations and an overflowing threshold', () => {
+		const policy = new SlidingWindowCounterPolicy({ limit: 1, windowMs: Number.MIN_VALUE })
+		const state = policy.charge(undefined, -Number.MIN_VALUE)
 
-				expect(allowedResult.decision.kind).toBe('allow');
-				expect(allowedResult.nextState).toEqual({ windowStart: 1000, currentCount: 3, previousCount: 10 });
-
-				const deniedResult = policy.evaluate(state, 1250, 4);
-				expect(deniedResult.decision.kind).toBe('deny');
-			});
-
-			it('should clear both counters if two or more windows have passed', () => {
-				const state = { windowStart: 0, currentCount: 10, previousCount: 5 };
-
-				const result = policy.evaluate(state, 2500, 5);
-
-				expect(result.decision.kind).toBe('allow');
-				expect(result.nextState).toEqual({ windowStart: 2000, currentCount: 5, previousCount: 0 });
-			});
-
-			it('should rotate window state even when a request is denied', () => {
-				const state = { windowStart: 0, currentCount: 10, previousCount: 0 };
-				const result = policy.evaluate(state, 1100, 2);
-
-				expect(result.decision.kind).toBe('deny');
-				expect(result.nextState).toEqual({ windowStart: 1000, currentCount: 0, previousCount: 10 });
-			});
-
-			it('should deny and calculate retryAt accurately within current window', () => {
-				const state = { windowStart: 0, previousCount: 10, currentCount: 0 };
-				const result = policy.evaluate(state, 100, 4);
-
-				expect(result.decision).toEqual({ kind: 'deny', retryAt: 301 });
-				expect(result.nextState).toEqual(state);
-			});
-
-			it('should deny and calculate retryAt accurately into the next window', () => {
-				const state = { windowStart: 0, previousCount: 5, currentCount: 6 };
-				const result = policy.evaluate(state, 500, 5);
-
-				expect(result.decision).toEqual({ kind: 'deny', retryAt: 1001 });
-			});
-		});
-	});
-
-	describe('Revert', () => {
-		const policy = new SlidingWindowCounterPolicy(10, 1000);
-
-		describe('Within the same window', () => {
-			it('should return unmodified state if cost is zero or negative', () => {
-				const state = { windowStart: 1000, currentCount: 5, previousCount: 2 };
-				const nextState = policy.revert(state, 0, 1500);
-
-				expect(nextState.currentCount).toBe(5);
-			});
-
-			it('should revert cost from currentCount only', () => {
-				const state = { windowStart: 1000, currentCount: 5, previousCount: 2 };
-				const nextState = policy.revert(state, 3, 1500);
-
-				expect(nextState).toEqual({ windowStart: 1000, currentCount: 2, previousCount: 2 });
-			});
-
-			it('should not drop currentCount below zero when reverting', () => {
-				const state = { windowStart: 1000, currentCount: 2, previousCount: 5 };
-				const nextState = policy.revert(state, 5, 1500);
-
-				expect(nextState).toEqual({ windowStart: 1000, currentCount: 0, previousCount: 5 });
-			});
-		});
-
-		describe('With time sync (window transitions)', () => {
-			it('should sync time and shift window before reverting', () => {
-				const state = { windowStart: 0, currentCount: 10, previousCount: 0 };
-				const nextState = policy.revert(state, 2, 1500);
-
-				expect(nextState).toEqual({ windowStart: 1000, currentCount: 0, previousCount: 10 });
-			});
-
-			it('should sync time and clear state if multiple windows passed before reverting', () => {
-				const state = { windowStart: 0, currentCount: 10, previousCount: 5 };
-				const nextState = policy.revert(state, 5, 2500);
-
-				expect(nextState).toEqual({ windowStart: 2000, currentCount: 0, previousCount: 0 });
-			});
-
-			it('should never mutate previousCount during revert even after sync', () => {
-				const state = { windowStart: 0, currentCount: 5, previousCount: 10 };
-				const nextState = policy.revert(state, 5, 1500);
-
-				expect(nextState).toEqual({ windowStart: 1000, currentCount: 0, previousCount: 5 });
-			});
-		});
-	});
-});
+		expect(policy.getStatus(state, 0)).toMatchObject({ currentCount: 0, previousCount: 1, nextAvailableAt: Number.MIN_VALUE })
+		expect(policy.check(state, Number.MIN_VALUE)).toBeUndefined()
+		expect(policy.check(policy.charge(undefined, Number.MAX_VALUE), Number.MAX_VALUE)).toBe(Infinity)
+	})
+})

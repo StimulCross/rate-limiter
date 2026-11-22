@@ -1,167 +1,99 @@
-import { type SlidingWindowCounterState } from './sliding-window-counter.state.js';
-import { type SlidingWindowCounterStatus } from './sliding-window-counter.status.js';
-import { type RateLimitPolicy, type RateLimitPolicyResult } from '../../core/rate-limit-policy.js';
-import { validateCost } from '../../utils/validate-cost.js';
+import type { RateLimitPolicy } from '../../contracts/rate-limit-policy.js'
+import type { SlidingWindowCounterLimitOptions } from './sliding-window-counter.options.js'
+import type { SlidingWindowCounterState, WindowCounts } from './sliding-window-counter.state.js'
+import type { SlidingWindowCounterStatus } from './sliding-window-counter.status.js'
+import { fromBinary64Units, toBinary64Units } from '../../utils/binary64-units.js'
+
+const UNITS_PER_MILLISECOND = toBinary64Units(1)
 
 /** @internal */
-export class SlidingWindowCounterPolicy implements RateLimitPolicy<
-	SlidingWindowCounterState,
-	SlidingWindowCounterStatus
-> {
-	constructor(
-		private readonly _limit: number,
-		private readonly _windowMs: number,
-	) {
-		if (!Number.isFinite(_limit) || !Number.isInteger(_limit) || _limit < 0) {
-			throw new Error(`Invalid limit: ${_limit}. Must be a positive integer.`);
-		}
+export class SlidingWindowCounterPolicy implements RateLimitPolicy<SlidingWindowCounterState, SlidingWindowCounterStatus> {
+	private readonly _limit: number
+	private readonly _windowMs: number
+	private readonly _duration: bigint
+	private readonly _offset: bigint
 
-		if (!Number.isFinite(_windowMs) || !Number.isInteger(_windowMs) || _windowMs <= 0) {
-			throw new Error(`Invalid windowMs: ${_windowMs}. Must be a positive integer.`);
-		}
+	constructor({ limit, windowMs, offsetMs = 0 }: SlidingWindowCounterLimitOptions) {
+		if (!Number.isSafeInteger(limit) || limit <= 0)
+			throw new RangeError('Sliding Window Counter limit must be a positive safe integer')
+
+		if (!Number.isFinite(windowMs) || windowMs <= 0)
+			throw new RangeError('Sliding Window Counter duration must be positive and finite')
+
+		if (!Number.isSafeInteger(offsetMs))
+			throw new RangeError('Sliding Window Counter grid offset must be a safe integer')
+
+		this._limit = limit
+		this._windowMs = windowMs
+		this._duration = toBinary64Units(windowMs)
+		this._offset = toBinary64Units(offsetMs)
 	}
 
-	public get limit(): number {
-		return this._limit;
+	public check(state: SlidingWindowCounterState | undefined, time: number): number | undefined {
+		return state !== undefined && state.nextAvailableAt > time ? state.nextAvailableAt : undefined
 	}
 
-	public get windowMs(): number {
-		return this._windowMs;
+	public charge(state: SlidingWindowCounterState | undefined, time: number): SlidingWindowCounterState {
+		const units = toBinary64Units(time)
+		const window = this._project(state, units)
+		const charged = { ...window, currentCount: window.currentCount + 1, nextAvailableAt: time }
+		charged.nextAvailableAt = this._getNextAvailableAt(charged, units) ?? time
+
+		return charged
 	}
 
-	public getInitialState(): SlidingWindowCounterState {
-		return {
-			windowStart: 0,
-			currentCount: 0,
-			previousCount: 0,
-		};
-	}
-
-	public getStatus(state: SlidingWindowCounterState, now: number): SlidingWindowCounterStatus {
-		const syncedState = this._syncState(state, now);
-		const { windowStart, previousCount, currentCount } = syncedState;
-
-		const timeIntoCurrentWindow = now - windowStart;
-		const weight = (this._windowMs - timeIntoCurrentWindow) / this._windowMs;
-		const estimatedCount = Math.floor(previousCount * weight + currentCount);
-
-		const remaining = Math.max(0, this._limit - estimatedCount);
-
-		const nextAvailableAt = this._calculateAvailableAt(windowStart, previousCount, currentCount, 1, now);
-
-		let resetAt: number;
-
-		if (currentCount > 0) {
-			resetAt = windowStart + 2 * this._windowMs;
-		} else if (previousCount > 0) {
-			resetAt = windowStart + this._windowMs;
-		} else {
-			resetAt = now;
-		}
+	public getStatus(state: SlidingWindowCounterState | undefined, time: number): SlidingWindowCounterStatus {
+		const units = toBinary64Units(time)
+		const { windowStart, currentCount, previousCount } = this._project(state, units)
+		const estimate = BigInt(currentCount) * this._duration + BigInt(previousCount) * (this._duration - (units - windowStart))
+		const capacity = BigInt(this._limit) * this._duration
 
 		return {
 			limit: this._limit,
 			windowMs: this._windowMs,
-			windowStart,
+			windowStart: fromBinary64Units(windowStart, 1n, 'nearest'),
 			currentCount,
 			previousCount,
-			estimatedCount,
-			remaining,
-			nextAvailableAt,
-			resetAt,
-		};
+			estimatedCount: fromBinary64Units(estimate * UNITS_PER_MILLISECOND, this._duration, 'nearest'),
+			remaining: Math.max(0, Number((capacity - estimate) / this._duration)),
+			nextAvailableAt: this.check(state, time) ?? time,
+		}
 	}
 
-	public evaluate(
-		state: SlidingWindowCounterState,
-		now: number,
-		cost: number,
-	): RateLimitPolicyResult<SlidingWindowCounterState> {
-		validateCost(cost, this._limit);
+	private _project(state: SlidingWindowCounterState | undefined, units: bigint): WindowCounts {
+		if (state !== undefined && units < state.windowStart + this._duration)
+			return state
 
-		const syncedState = this._syncState(state, now);
-		const { windowStart, previousCount, currentCount } = syncedState;
-
-		const timeIntoCurrentWindow = now - windowStart;
-		const weight = (this._windowMs - timeIntoCurrentWindow) / this._windowMs;
-		const estimatedCount = Math.floor(previousCount * weight + currentCount);
-
-		if (estimatedCount + cost <= this._limit) {
-			return {
-				decision: { kind: 'allow' },
-				nextState: {
-					windowStart,
-					previousCount,
-					currentCount: currentCount + cost,
-				},
-			};
-		}
-
-		const availableAt = this._calculateAvailableAt(windowStart, previousCount, currentCount, cost, now);
+		const relative = units - this._offset
+		const index = relative < 0n
+			? (relative - this._duration + 1n) / this._duration
+			: relative / this._duration
 
 		return {
-			decision: { kind: 'deny', retryAt: availableAt },
-			nextState: syncedState,
-		};
-	}
-
-	public revert(state: SlidingWindowCounterState, cost: number, now: number): SlidingWindowCounterState {
-		if (cost <= 0) {
-			return state;
-		}
-
-		const syncedState = this._syncState(state, now);
-
-		return {
-			...syncedState,
-			currentCount: Math.max(0, syncedState.currentCount - cost),
-		};
-	}
-
-	private _syncState(state: SlidingWindowCounterState, now: number): SlidingWindowCounterState {
-		const currentWindowStart = Math.floor(now / this._windowMs) * this._windowMs;
-
-		if (currentWindowStart <= state.windowStart) {
-			return state;
-		}
-
-		const windowsPassed = Math.floor((currentWindowStart - state.windowStart) / this._windowMs);
-
-		if (windowsPassed > 1) {
-			return { windowStart: currentWindowStart, previousCount: 0, currentCount: 0 };
-		}
-
-		return {
-			windowStart: currentWindowStart,
-			previousCount: state.currentCount,
+			index,
+			windowStart: this._offset + index * this._duration,
 			currentCount: 0,
-		};
+			previousCount: state !== undefined && index === state.index + 1n
+				? state.currentCount
+				: 0,
+		}
 	}
 
-	private _calculateAvailableAt(windowStart: number, prev: number, curr: number, cost: number, now: number): number {
-		if (curr + cost <= this._limit) {
-			if (prev === 0) {
-				return now;
-			}
+	private _getNextAvailableAt({ windowStart, currentCount, previousCount }: WindowCounts, units: bigint): number | undefined {
+		const deficit = previousCount - (this._limit - currentCount - 1)
 
-			const numerator = this._windowMs * (prev + curr + cost - this._limit - 1);
-			const t = Math.max(0, Math.floor(numerator / prev) + 1);
-			const absoluteTime = windowStart + t;
+		if (deficit <= 0)
+			return undefined
 
-			return Math.max(now, absoluteTime);
+		if (currentCount === this._limit) {
+			const count = BigInt(currentCount)
+
+			return fromBinary64Units((windowStart + this._duration) * count + this._duration, count, 'up')
 		}
 
-		const newPrev = curr;
-		const newWindowStart = windowStart + this._windowMs;
+		const count = BigInt(previousCount)
+		const numerator = windowStart * count + this._duration * BigInt(deficit)
 
-		if (newPrev === 0) {
-			return Math.max(now, newWindowStart);
-		}
-
-		const numerator = this._windowMs * (newPrev + cost - this._limit - 1);
-		const t = Math.max(0, Math.floor(numerator / newPrev) + 1);
-		const absoluteTime = newWindowStart + t;
-
-		return Math.max(now, absoluteTime);
+		return numerator > units * count ? fromBinary64Units(numerator, count, 'up') : undefined
 	}
 }

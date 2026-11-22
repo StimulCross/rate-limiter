@@ -1,53 +1,48 @@
-import { type RateLimiterStatus } from '../../core/rate-limiter-status.js';
-
 /**
- * The status of the Sliding Window Counter rate limiter.
+ * An observational snapshot of one key's Sliding Window Counter quota.
  */
-export interface SlidingWindowCounterStatus extends RateLimiterStatus {
+export interface SlidingWindowCounterStatus {
 	/**
-	 * Maximum number of requests allowed within the time window.
+	 * Configured limit on estimated usage after a start.
 	 */
-	limit: number;
+	readonly limit: number
 
 	/**
-	 * Duration of the time window in milliseconds.
+	 * Duration of each grid window in milliseconds.
 	 */
-	windowMs: number;
+	readonly windowMs: number
 
 	/**
-	 * Timestamp (in milliseconds) when the current window started.
+	 * Start of the current grid window in Unix epoch milliseconds, rounded to a `Number`.
 	 */
-	windowStart: number;
+	readonly windowStart: number
 
 	/**
-	 * Number of requests made in the current window.
+	 * Starts in the current grid window.
 	 */
-	currentCount: number;
+	readonly currentCount: number
 
 	/**
-	 * Number of requests made in the previous window.
+	 * Starts in the preceding grid window.
 	 */
-	previousCount: number;
+	readonly previousCount: number
 
 	/**
-	 * Estimated request count based on the sliding window algorithm.
+	 * Current count plus the previous count weighted by the fraction of the window left.
+	 */
+	readonly estimatedCount: number
+
+	/**
+	 * Whole starts available immediately, computed before rounding the displayed estimate.
+	 */
+	readonly remaining: number
+
+	/**
+	 * Earliest quota-eligible start in Unix epoch milliseconds, assuming no intervening starts.
 	 *
-	 * Calculated by combining current and previous window counts proportionally.
+	 * A free execution slot and winning selection are also required for an actual start.
+	 *
+	 * `Infinity` indicates that the quota cannot recover within the clock's finite range.
 	 */
-	estimatedCount: number;
-
-	/**
-	 * Number of requests remaining before hitting the limit.
-	 */
-	remaining: number;
-
-	/**
-	 * Timestamp (in milliseconds) when the next request slot becomes available.
-	 */
-	nextAvailableAt: number;
-
-	/**
-	 * Timestamp (in milliseconds) when the current window resets.
-	 */
-	resetAt: number;
+	readonly nextAvailableAt: number
 }

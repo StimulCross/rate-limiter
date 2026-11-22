@@ -1,54 +1,40 @@
-import { type RateLimiterStatus } from '../../core/rate-limiter-status.js';
+import type { GenericCellLimitOptions } from './generic-cell.options.js'
 
 /**
- * The status of the Generic Cell rate limiter.
+ * An observational snapshot of one Generic Cell profile.
  */
-export interface GenericCellStatus extends RateLimiterStatus {
+export interface GenericCellProfileStatus extends GenericCellLimitOptions {
 	/**
-	 * The minimum interval between tokens (in milliseconds).
+	 * Theoretical arrival time of the profile in Unix epoch milliseconds, rounded up to
+	 * a representable timestamp.
 	 *
-	 * It represents the emission interval - the time period between
-	 * successive token emissions at the steady-state rate.
+	 * The profile has fully recovered at this time.
+	 *
+	 * `null` indicates that no callback has started for this key since initialization or clear.
 	 */
-	readonly intervalMs: number;
+	readonly tat: number | null
 
 	/**
-	 * The maximum burst size (maximum number of tokens that can be accumulated).
-	 *
-	 * It represents the burst capacity - the maximum number of requests
-	 * that can be made instantaneously when the bucket is full.
+	 * Number of starts the profile can allow at the observed time.
 	 */
-	readonly burst: number;
+	readonly remaining: number
+}
+
+/**
+ * An observational snapshot of one key's Generic Cell quotas.
+ */
+export interface GenericCellStatus {
+	/**
+	 * Earliest quota-eligible timestamp in Unix epoch milliseconds with no intervening starts.
+	 *
+	 * A free execution slot and winning selection are also required for an actual start.
+	 *
+	 * `Infinity` indicates that the quota cannot recover within the clock's finite range.
+	 */
+	readonly nextAvailableAt: number
 
 	/**
-	 * Theoretical Arrival Time (TAT) - the virtual time when the bucket will be empty.
-	 *
-	 * TAT represents the earliest time at which a future request could be allowed.
-	 *
-	 * Value is in milliseconds.
+	 * Per-profile quota snapshots in configuration order.
 	 */
-	readonly tat: number;
-
-	/**
-	 * The number of tokens that can be used immediately.
-	 *
-	 * Calculated as the time allowance available between now and TAT, divided by
-	 * the emission interval.
-	 */
-	readonly remaining: number;
-
-	/**
-	 * The timestamp (in milliseconds) when the next token will be available for use.
-	 *
-	 * This is the earliest time when a request can be accepted if no tokens are currently available.
-	 */
-	readonly nextAvailableAt: number;
-
-	/**
-	 * The timestamp when all tokens will be available for use again.
-	 *
-	 * It is when the TAT returns to the current time, meaning the bucket has fully recovered to its
-	 * maximum burst capacity.
-	 */
-	readonly resetAt: number;
+	readonly profiles: readonly GenericCellProfileStatus[]
 }

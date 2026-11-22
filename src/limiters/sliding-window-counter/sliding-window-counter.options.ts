@@ -1,20 +1,47 @@
-import { type SlidingWindowCounterState } from './sliding-window-counter.state.js';
-import { type RateLimiterOptions } from '../../interfaces/rate-limiter-options.js';
+import type { PriorityWeights } from '../../contracts/priority-weights.js'
+import type { RateLimiterOptions } from '../../contracts/rate-limiter-options.js'
 
 /**
- * Options for the Sliding Window Counter rate limiter.
+ * Configuration of the single Sliding Window Counter horizon.
  */
-export interface SlidingWindowCounterOptions extends Omit<
-	RateLimiterOptions<SlidingWindowCounterState>,
-	'queue' | 'limitBehavior'
-> {
+export interface SlidingWindowCounterLimitOptions {
 	/**
-	 * Maximum number of requests allowed within the time window.
+	 * Maximum estimated usage after a start.
+	 *
+	 * Must be a positive safe integer.
 	 */
-	limit: number;
+	readonly limit: number
 
 	/**
-	 * Duration of the time window in milliseconds.
+	 * Duration of each grid window in milliseconds.
+	 *
+	 * Must be positive and finite.
 	 */
-	windowMs: number;
+	readonly windowMs: number
+
+	/**
+	 * Grid origin in milliseconds relative to the Unix epoch.
+	 *
+	 * Must be a safe integer.
+	 *
+	 * @default 0
+	 */
+	readonly offsetMs?: number
+}
+
+/**
+ * Configuration for a local Sliding Window Counter limiter.
+ */
+export interface SlidingWindowCounterOptions extends RateLimiterOptions {
+	/**
+	 * The horizon applied independently to each key.
+	 */
+	limitOptions: SlidingWindowCounterLimitOptions
+
+	/**
+	 * Weights for global scheduling across keys.
+	 *
+	 * Defaults to `1`, `2`, `4`, `8`, and `16` from lowest to highest priority.
+	 */
+	weights?: PriorityWeights
 }

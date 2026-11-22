@@ -1,36 +1,24 @@
-import { type RateLimiterStatus } from '../../core/rate-limiter-status.js';
+import type { LeakyBucketLimitOptions } from './leaky-bucket-options.js'
 
 /**
- * The status of the Leaky Bucket rate limiter.
+ * An observational snapshot of one key's Leaky Bucket pacing history.
  */
-export interface LeakyBucketStatus extends RateLimiterStatus {
+export interface LeakyBucketStatus extends LeakyBucketLimitOptions {
 	/**
-	 * The maximum capacity of the bucket (maximum number of requests that can be queued).
+	 * Effective quota time of the last actual start in Unix epoch milliseconds.
+	 *
+	 * `null` if the key has no start history.
 	 */
-	capacity: number;
+	readonly lastStartedAt: number | null
 
 	/**
-	 * The rate at which requests leak from the bucket (requests per second).
+	 * Earliest quota-eligible timestamp in Unix epoch milliseconds.
+	 *
+	 * For a ready key, this is the effective observation time.
+	 *
+	 * `Infinity` indicates that the key stays blocked until cleared.
+	 *
+	 * An actual start also requires a free execution slot and winning selection.
 	 */
-	leakRate: number;
-
-	/**
-	 * The current number of requests in the bucket waiting to be processed.
-	 */
-	level: number;
-
-	/**
-	 * The number of requests that can still be added to the bucket before reaching capacity.
-	 */
-	remaining: number;
-
-	/**
-	 * Timestamp (in milliseconds) when the next request slot will become available.
-	 */
-	nextAvailableAt: number;
-
-	/**
-	 * Timestamp (in milliseconds) when all queued requests will have leaked (bucket becomes empty).
-	 */
-	resetAt: number;
+	readonly nextAvailableAt: number
 }

@@ -1,285 +1,145 @@
-import { Deque } from '@stimulcross/ds-deque';
-import { describe, it, expect } from 'vitest';
-import { InvalidCostError } from '../../../src/index.js';
-import {
-	type SlidingWindowLogEntry,
-	type SlidingWindowLogState,
-} from '../../../src/limiters/sliding-window-log/index.js';
-import { SlidingWindowLogPolicy } from '../../../src/limiters/sliding-window-log/sliding-window-log.policy.js';
+import type { SlidingWindowLogState } from '../../../src/limiters/sliding-window-log/sliding-window-log.state.js'
+import { describe, expect, it } from 'vitest'
+import { SlidingWindowLogPolicy } from '../../../src/limiters/sliding-window-log/sliding-window-log.policy.js'
 
-function buildState(entries: SlidingWindowLogEntry[]): SlidingWindowLogState {
-	const logs = new Deque<SlidingWindowLogEntry>();
-	let totalUsed = 0;
+function chargeStart(policy: SlidingWindowLogPolicy, history: SlidingWindowLogState | undefined, time: number) {
+	expect(policy.check(history, time)).toBeUndefined()
 
-	for (const entry of entries) {
-		logs.push({ ...entry });
-		totalUsed += entry.count;
-	}
-
-	return { logs, totalUsed };
+	return policy.charge(history, time)
 }
 
 describe('SlidingWindowLogPolicy', () => {
-	describe('Constructor and getters', () => {
-		it('should initialize with valid parameters', () => {
-			const policy = new SlidingWindowLogPolicy(10, 1000);
-			expect(policy.limit).toBe(10);
-			expect(policy.windowMs).toBe(1000);
-		});
+	it('should count each start at zero and expire simultaneous starts at their boundary', () => {
+		const policy = new SlidingWindowLogPolicy([
+			{ limit: 2, windowMs: 1000 },
+		])
 
-		it('should throw an error for invalid limit', () => {
-			expect(() => new SlidingWindowLogPolicy(0, 1000)).toThrow(/Invalid limit/u);
-			expect(() => new SlidingWindowLogPolicy(-5, 1000)).toThrow(/Invalid limit/u);
-			expect(() => new SlidingWindowLogPolicy(1.5, 1000)).toThrow(/Invalid limit/u);
-			expect(() => new SlidingWindowLogPolicy(Infinity, 1000)).toThrow(/Invalid limit/u);
-		});
+		expect(policy.getStatus(undefined, 0)).toEqual({
+			nextAvailableAt: 0,
+			profiles: [
+				{
+					limit: 2,
+					windowMs: 1000,
+					used: 0,
+					remaining: 2,
+				},
+			],
+		})
 
-		it('should throw an error for invalid windowMs', () => {
-			expect(() => new SlidingWindowLogPolicy(10, 0)).toThrow(/Invalid windowMs/u);
-			expect(() => new SlidingWindowLogPolicy(10, -100)).toThrow(/Invalid windowMs/u);
-			expect(() => new SlidingWindowLogPolicy(10, 100.5)).toThrow(/Invalid windowMs/u);
-			expect(() => new SlidingWindowLogPolicy(10, Number.NaN)).toThrow(/Invalid windowMs/u);
-		});
+		let history = chargeStart(policy, undefined, 0)
+		history = chargeStart(policy, history, 0)
+		expect(policy.getStatus(history, 999).profiles[0]?.used).toBe(2)
+		expect(policy.check(history, 999)).toBe(1000)
+		expect(policy.getStatus(history, 1000).profiles[0]?.used).toBe(0)
 
-		it('should return correct initial state', () => {
-			const policy = new SlidingWindowLogPolicy(5, 1000);
-			const state = policy.getInitialState();
+		history = chargeStart(policy, history, 1000)
+		expect([...history]).toEqual([1000])
+		expect(policy.getStatus(history, 1000).profiles[0]?.remaining).toBe(1)
+	})
 
-			expect(state.totalUsed).toBe(0);
-			expect(state.logs).toBeInstanceOf(Deque);
-			expect(state.logs.isEmpty).toBe(true);
-		});
-	});
+	it('should prune only the starts that have expired for every profile when charging', () => {
+		const policy = new SlidingWindowLogPolicy([
+			{ limit: 2, windowMs: 100 },
+			{ limit: 4, windowMs: 250 },
+		])
+		let history: SlidingWindowLogState | undefined
 
-	describe('Get Status', () => {
-		const policy = new SlidingWindowLogPolicy(5, 1000);
+		for (const time of [0, 10, 100, 110])
+			history = chargeStart(policy, history, time)
 
-		it('should return correct status for empty state', () => {
-			const state = policy.getInitialState();
-			const status = policy.getStatus(state, 500);
+		expect(policy.check(history, 111)).toBe(250)
+		expect(policy.check(history, 200)).toBe(250)
+		expect(policy.getStatus(history, 200).profiles.map(profile => profile.used)).toEqual([1, 4])
 
-			expect(status.limit).toBe(5);
-			expect(status.windowMs).toBe(1000);
-			expect(status.totalUsed).toBe(0);
-			expect(status.remaining).toBe(5);
-			expect(status.nextAvailableAt).toBe(500);
-			expect(status.resetAt).toBe(500);
-		});
+		history = chargeStart(policy, history, 250)
+		expect([...history]).toEqual([10, 100, 110, 250])
+		expect(policy.getStatus(history, 250).profiles.map(profile => profile.used)).toEqual([1, 4])
+		expect(policy.check(history, 250)).toBe(260)
 
-		it('should clear expired logs during getStatus and return accurate remaining capacity', () => {
-			const state = buildState([
-				{ ts: 100, count: 2 },
-				{ ts: 500, count: 1 },
-			]);
-			const status = policy.getStatus(state, 1200);
+		history = chargeStart(policy, history, 260)
+		expect([...history]).toEqual([100, 110, 250, 260])
+		expect(policy.check(history, 260)).toBe(350)
+	})
 
-			expect(status.totalUsed).toBe(1);
-			expect(status.remaining).toBe(4);
-			expect(status.resetAt).toBe(1500);
-		});
+	it('should leave history intact when a longer profile denies a start or status projects expiry', () => {
+		const policy = new SlidingWindowLogPolicy([
+			{ limit: 1, windowMs: 100 },
+			{ limit: 1, windowMs: 1000 },
+		])
+		const history = chargeStart(policy, undefined, 100)
 
-		it('should calculate precise nextAvailableAt when queue is full', () => {
-			const state = buildState([
-				{ ts: 100, count: 2 },
-				{ ts: 500, count: 3 },
-			]);
+		expect(policy.check(history, 250)).toBe(1100)
+		expect(policy.getStatus(history, 250).profiles.map(profile => profile.used)).toEqual([0, 1])
+		expect(policy.getStatus(history, 1200).profiles.map(profile => profile.used)).toEqual([0, 0])
+		expect([...history]).toEqual([100])
+		expect(policy.check(history, 150)).toBe(1100)
+		expect(policy.getStatus(history, 150).profiles.map(profile => profile.used)).toEqual([1, 1])
+	})
 
-			const status = policy.getStatus(state, 600);
+	it('should expire a fractional window that crosses timestamp zero', () => {
+		const policy = new SlidingWindowLogPolicy([
+			{ limit: 1, windowMs: 0.5 },
+		])
+		const history = chargeStart(policy, undefined, -0.25)
 
-			expect(status.remaining).toBe(0);
-			expect(status.nextAvailableAt).toBe(1100);
-			expect(status.resetAt).toBe(1500);
-		});
-	});
+		expect(policy.check(history, 0)).toBe(0.25)
+		expect(policy.getStatus(history, 0).profiles[0]?.used).toBe(1)
+		expect(policy.check(history, 0.25)).toBeUndefined()
+		expect(policy.getStatus(history, 0.25).profiles[0]?.used).toBe(0)
+	})
 
-	describe('Evaluate', () => {
-		describe('Validation and Edge Cases', () => {
-			const policy = new SlidingWindowLogPolicy(5, 1000);
+	it('should use the oldest active start of a full short window even when older history is retained', () => {
+		const policy = new SlidingWindowLogPolicy([
+			{ limit: 5, windowMs: 100 },
+			{ limit: 2, windowMs: 10 },
+		])
+		let history: SlidingWindowLogState | undefined
 
-			it('should throw if cost itself exceeds limit', () => {
-				const state = policy.getInitialState();
-				expect(() => policy.evaluate(state, 500, 6)).toThrow(InvalidCostError);
-			});
-		});
+		for (const time of [0, 10, 20, 21])
+			history = chargeStart(policy, history, time)
 
-		describe('Immediate execution', () => {
-			const policy = new SlidingWindowLogPolicy(2, 1000);
+		expect(policy.getStatus(history, 29)).toEqual({
+			nextAvailableAt: 30,
+			profiles: [
+				{
+					limit: 5,
+					windowMs: 100,
+					used: 4,
+					remaining: 1,
+				},
+				{
+					limit: 2,
+					windowMs: 10,
+					used: 2,
+					remaining: 0,
+				},
+			],
+		})
 
-			it('should allow request when within limit', () => {
-				const state = policy.getInitialState();
-				const result = policy.evaluate(state, 500, 1);
+		expect(policy.check(history, 29)).toBe(30)
+		history = chargeStart(policy, history, 30)
+		expect(policy.check(history, 30)).toBe(100)
+		expect(policy.getStatus(history, 31).profiles.map(profile => profile.remaining)).toEqual([0, 1])
+	})
 
-				expect(result.decision).toEqual({ kind: 'allow' });
-				expect(result.nextState.totalUsed).toBe(1);
-				expect(result.nextState.logs.size).toBe(1);
-				expect(result.nextState.logs.peekTail()).toEqual({ ts: 500, count: 1 });
-			});
+	it('should keep a start active when its expiry exceeds the finite timestamp range', () => {
+		const policy = new SlidingWindowLogPolicy([
+			{ limit: 1, windowMs: Number.MIN_VALUE },
+		])
+		const history = chargeStart(policy, undefined, Number.MAX_VALUE)
 
-			it('should allow request with cost > 1 if within limit', () => {
-				const state = policy.getInitialState();
-				const result = policy.evaluate(state, 500, 2);
+		expect(policy.check(history, Number.MAX_VALUE)).toBe(Infinity)
 
-				expect(result.decision).toEqual({ kind: 'allow' });
-				expect(result.nextState.totalUsed).toBe(2);
-				expect(result.nextState.logs.peekTail()?.count).toBe(2);
-			});
-
-			it('should deny request and return precise retryAt when limit is exceeded', () => {
-				const state = buildState([{ ts: 100, count: 2 }]);
-				const result = policy.evaluate(state, 500, 1);
-
-				expect(result.decision).toEqual({ kind: 'deny', retryAt: 1100 });
-				expect(result.nextState.totalUsed).toBe(2);
-			});
-		});
-
-		describe('Log grouping and aggregation', () => {
-			const policy = new SlidingWindowLogPolicy(5, 1000);
-
-			it('should mutate existing log entry if timestamp exactly matches now', () => {
-				const state = buildState([{ ts: 500, count: 1 }]);
-				const result = policy.evaluate(state, 500, 2);
-
-				expect(result.decision.kind).toBe('allow');
-				expect(result.nextState.logs.size).toBe(1);
-				expect(result.nextState.logs.peekTail()).toEqual({ ts: 500, count: 3 });
-				expect(result.nextState.totalUsed).toBe(3);
-			});
-
-			it('should append a new log entry if timestamp differs', () => {
-				const state = buildState([{ ts: 500, count: 1 }]);
-				const result = policy.evaluate(state, 501, 2);
-
-				expect(result.nextState.logs.size).toBe(2);
-				expect(result.nextState.logs.peekTail()).toEqual({ ts: 501, count: 2 });
-				expect(result.nextState.totalUsed).toBe(3);
-			});
-		});
-
-		describe('Eviction and Exact retryAt Calculation', () => {
-			const policy = new SlidingWindowLogPolicy(5, 1000);
-
-			it('should evict expired logs from the front of the queue', () => {
-				const state = buildState([
-					{ ts: 100, count: 2 },
-					{ ts: 500, count: 1 },
-				]);
-
-				const result = policy.evaluate(state, 1200, 1);
-
-				expect(result.decision.kind).toBe('allow');
-				expect(result.nextState.logs.size).toBe(2);
-				expect(result.nextState.logs.peekHead()).toEqual({ ts: 500, count: 1 });
-				expect(result.nextState.totalUsed).toBe(2);
-			});
-
-			it('should evaluate retryAt correctly by summing multiple logs if necessary', () => {
-				const state = buildState([
-					{ ts: 100, count: 1 },
-					{ ts: 200, count: 2 },
-					{ ts: 500, count: 2 },
-				]);
-
-				const result = policy.evaluate(state, 600, 3);
-				expect(result.decision).toEqual({ kind: 'deny', retryAt: 1200 });
-			});
-		});
-	});
-
-	describe('Revert', () => {
-		const policy = new SlidingWindowLogPolicy(10, 1000);
-
-		describe('Within the same window', () => {
-			it('should return unmodified state if cost is zero or negative', () => {
-				const state = buildState([{ ts: 500, count: 3 }]);
-				const nextState = policy.revert(state, 0, 1000);
-
-				expect(nextState.totalUsed).toBe(3);
-				expect(nextState.logs.size).toBe(1);
-			});
-
-			it('should return unmodified state if totalUsed is zero', () => {
-				const state = policy.getInitialState();
-				const nextState = policy.revert(state, 5, 1000);
-
-				expect(nextState.totalUsed).toBe(0);
-				expect(nextState.logs.isEmpty).toBe(true);
-			});
-
-			it('should revert exact cost by decrementing the tail log count', () => {
-				const state = buildState([
-					{ ts: 100, count: 2 },
-					{ ts: 200, count: 3 },
-				]);
-
-				const nextState = policy.revert(state, 2, 1000);
-
-				expect(nextState.totalUsed).toBe(3);
-				expect(nextState.logs.size).toBe(2);
-				expect(nextState.logs.peekTail()).toEqual({ ts: 200, count: 1 });
-			});
-
-			it('should remove the tail log entirely if revert cost equals its count', () => {
-				const state = buildState([
-					{ ts: 100, count: 2 },
-					{ ts: 200, count: 3 },
-				]);
-
-				const nextState = policy.revert(state, 3, 1000);
-
-				expect(nextState.totalUsed).toBe(2);
-				expect(nextState.logs.size).toBe(1);
-				expect(nextState.logs.peekTail()).toEqual({ ts: 100, count: 2 });
-			});
-
-			it('should remove multiple newer entries if cost spans across them', () => {
-				const state = buildState([
-					{ ts: 100, count: 2 },
-					{ ts: 200, count: 3 },
-					{ ts: 300, count: 1 },
-				]);
-
-				const nextState = policy.revert(state, 5, 1000);
-
-				expect(nextState.totalUsed).toBe(1);
-				expect(nextState.logs.size).toBe(1);
-				expect(nextState.logs.peekHead()).toEqual({ ts: 100, count: 1 });
-			});
-
-			it('should not drop totalUsed below zero when reverting excessively large costs', () => {
-				const state = buildState([{ ts: 100, count: 2 }]);
-				const nextState = policy.revert(state, 10, 1000);
-
-				expect(nextState.totalUsed).toBe(0);
-				expect(nextState.logs.isEmpty).toBe(true);
-			});
-		});
-
-		describe('With time sync (window transitions)', () => {
-			it('should sync time and remove expired logs before reverting', () => {
-				const state = buildState([
-					{ ts: 100, count: 2 },
-					{ ts: 500, count: 3 },
-				]);
-
-				const nextState = policy.revert(state, 1, 1200);
-
-				expect(nextState.totalUsed).toBe(2);
-				expect(nextState.logs.size).toBe(1);
-				expect(nextState.logs.peekHead()).toEqual({ ts: 500, count: 2 });
-			});
-
-			it('should handle revert safely if all logs expired before revert', () => {
-				const state = buildState([
-					{ ts: 100, count: 2 },
-					{ ts: 200, count: 3 },
-				]);
-
-				const nextState = policy.revert(state, 2, 1500);
-
-				expect(nextState.totalUsed).toBe(0);
-				expect(nextState.logs.isEmpty).toBe(true);
-			});
-		});
-	});
-});
+		expect(policy.getStatus(history, Number.MAX_VALUE)).toEqual({
+			nextAvailableAt: Infinity,
+			profiles: [
+				{
+					limit: 1,
+					windowMs: Number.MIN_VALUE,
+					used: 1,
+					remaining: 0,
+				},
+			],
+		})
+	})
+})

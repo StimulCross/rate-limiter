@@ -1,23 +1,42 @@
-import { type GenericCellState } from './generic-cell.state.js';
-import { type RateLimiterOptions } from '../../interfaces/rate-limiter-options.js';
+import type { PriorityWeights } from '../../contracts/priority-weights.js'
+import type { RateLimiterOptions } from '../../contracts/rate-limiter-options.js'
 
 /**
- * Options for the Generic Cell Rate Algorithm (GCRA) limiter.
+ * One per-key Generic Cell Rate Algorithm (GCRA) profile.
  */
-export interface GenericCellOptions extends RateLimiterOptions<GenericCellState> {
+export interface GenericCellLimitOptions {
 	/**
-	 * The minimum interval between requests (in milliseconds).
+	 * Nominal time between starts in milliseconds.
 	 *
-	 * This defines the emission interval.
-	 * For example, if you want to allow 10 requests per second, set this to 100ms (1000ms / 10).
+	 * Must be a positive safe integer.
+	 *
+	 * With a burst of one, this is also the minimum spacing between starts.
 	 */
-	intervalMs: number;
+	readonly intervalMs: number
 
 	/**
-	 * The maximum burst size.
+	 * Maximum number of starts allowed at one timestamp after full recovery.
 	 *
-	 * This defines how many requests can be made immediately in quick succession before rate limiting kicks in.
-	 * The burst capacity allows temporary spikes in traffic.
+	 * Must be a positive safe integer.
 	 */
-	burst: number;
+	readonly burst: number
+}
+
+/**
+ * Configuration for a local Generic Cell limiter.
+ */
+export interface GenericCellOptions extends RateLimiterOptions {
+	/**
+	 * A profile or a nonempty list of profiles.
+	 *
+	 * Each start must pass every profile for its key.
+	 */
+	limitOptions: GenericCellLimitOptions | readonly GenericCellLimitOptions[]
+
+	/**
+	 * Weights for global scheduling across keys.
+	 *
+	 * Defaults to `1`, `2`, `4`, `8`, and `16` from lowest to highest priority.
+	 */
+	weights?: PriorityWeights
 }

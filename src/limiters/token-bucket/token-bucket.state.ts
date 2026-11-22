@@ -1,10 +1,12 @@
-/**
- * Token Bucket rate limiter state.
- *
- * When using a distributed state store, make sure it properly serializes and deserializes the state.
- */
+/** @internal */
+export interface TokenBalance {
+	tokens: number
+	// Keep sub-token refill separate so it does not round against the whole-token count.
+	milliTokens: number
+}
+
+/** @internal */
 export interface TokenBucketState {
-	tokens: number;
-	debt: number;
-	lastRefill: number;
+	chargedAt: number
+	readonly balances: readonly TokenBalance[]
 }

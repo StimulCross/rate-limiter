@@ -1,20 +1,40 @@
-import { type SlidingWindowLogState } from './sliding-window-log.state.js';
-import { type RateLimiterOptions } from '../../interfaces/rate-limiter-options.js';
+import type { PriorityWeights } from '../../contracts/priority-weights.js'
+import type { RateLimiterOptions } from '../../contracts/rate-limiter-options.js'
 
 /**
- * Options for the Sliding Window Log rate limiter.
+ * One per-key Sliding Window Log profile.
  */
-export interface SlidingWindowLogOptions extends Omit<
-	RateLimiterOptions<SlidingWindowLogState>,
-	'queue' | 'limitBehavior'
-> {
+export interface SlidingWindowLogLimitOptions {
 	/**
-	 * Maximum number of requests allowed within the time window.
+	 * Maximum callback starts within the sliding window.
+	 *
+	 * Must be a positive safe integer.
 	 */
-	limit: number;
+	readonly limit: number
 
 	/**
-	 * Duration of the time window in milliseconds.
+	 * Time in milliseconds for which a start counts against quota.
+	 *
+	 * Must be positive and finite.
 	 */
-	windowMs: number;
+	readonly windowMs: number
+}
+
+/**
+ * Configuration for a local Sliding Window Log limiter.
+ */
+export interface SlidingWindowLogOptions extends RateLimiterOptions {
+	/**
+	 * A profile or a nonempty list of profiles.
+	 *
+	 * Each start must pass every profile for its key.
+	 */
+	limitOptions: SlidingWindowLogLimitOptions | readonly SlidingWindowLogLimitOptions[]
+
+	/**
+	 * Weights for global scheduling across keys.
+	 *
+	 * Defaults to `1`, `2`, `4`, `8`, and `16` from lowest to highest priority.
+	 */
+	weights?: PriorityWeights
 }

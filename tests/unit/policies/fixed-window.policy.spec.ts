@@ -1,260 +1,301 @@
-import { describe, it, expect } from 'vitest';
-import { InvalidCostError } from '../../../src/index.js';
-import { FixedWindowPolicy } from '../../../src/limiters/fixed-window/fixed-window.policy.js';
+import type { FixedWindowState } from '../../../src/limiters/fixed-window/fixed-window.state.js'
+import { describe, expect, it } from 'vitest'
+import { FixedWindowPolicy } from '../../../src/limiters/fixed-window/fixed-window.policy.js'
+
+function chargeStart(policy: FixedWindowPolicy, state: FixedWindowState | undefined, now: number) {
+	expect(policy.check(state, now)).toBeUndefined()
+
+	return policy.charge(state, now)
+}
 
 describe('FixedWindowPolicy', () => {
-	describe('Constructor', () => {
-		it('should initialize with valid parameters', () => {
-			const policy = new FixedWindowPolicy(10, 1000);
-			expect(policy.limit).toBe(10);
-			expect(policy.windowMs).toBe(1000);
-		});
+	it('should open a first-start window at zero and reopen only on the next start after expiry', () => {
+		const policy = new FixedWindowPolicy([
+			{ limit: 3, windowMs: 1000 },
+		])
 
-		it('should throw an error for invalid limit', () => {
-			expect(() => new FixedWindowPolicy(0, 1000)).toThrow(/Invalid limit/u);
-			expect(() => new FixedWindowPolicy(-5, 1000)).toThrow(/Invalid limit/u);
-			expect(() => new FixedWindowPolicy(1.5, 1000)).toThrow(/Invalid limit/u);
-		});
+		expect(policy.getStatus(undefined, -100).profiles).toEqual([
+			{
+				window: null,
+				limit: 3,
+				used: 0,
+				remaining: 3,
+			},
+		])
 
-		it('should throw an error for invalid windowMs', () => {
-			expect(() => new FixedWindowPolicy(10, 0)).toThrow(/Invalid windowMs/u);
-			expect(() => new FixedWindowPolicy(10, -100)).toThrow(/Invalid windowMs/u);
-			expect(() => new FixedWindowPolicy(10, 100.5)).toThrow(/Invalid windowMs/u);
-		});
+		let state = chargeStart(policy, undefined, 0)
+		state = chargeStart(policy, state, 0)
+		state = chargeStart(policy, state, 999)
+		expect(policy.check(state, 999)).toBe(1000)
 
-		it('should throw an error for invalid maxReserved', () => {
-			expect(() => new FixedWindowPolicy(10, 1000, -5)).toThrow(/Invalid maxReserved/u);
-			expect(() => new FixedWindowPolicy(10, 1000, 2.5)).toThrow(/Invalid maxReserved/u);
-		});
+		expect(policy.getStatus(state, 999).profiles[0]).toEqual({
+			window: { start: 0, end: 1000 },
+			limit: 3,
+			used: 3,
+			remaining: 0,
+		})
 
-		it('should return correct initial state', () => {
-			const policy = new FixedWindowPolicy(5, 1000);
-			expect(policy.getInitialState()).toEqual({ windowStart: 0, used: 0, reserved: 0 });
-		});
-	});
+		expect(policy.getStatus(state, 1000).profiles[0]).toEqual({
+			window: null,
+			limit: 3,
+			used: 0,
+			remaining: 3,
+		})
 
-	describe('Get Status', () => {
-		const policy = new FixedWindowPolicy(10, 1000);
+		expect(policy.check(state, 1000)).toBeUndefined()
 
-		it('should return correct info for empty state', () => {
-			const state = policy.getInitialState();
-			const status = policy.getStatus(state, 500);
+		state = chargeStart(policy, state, 2500)
+		state = chargeStart(policy, state, 2500)
+		expect(policy.check(state, 2500)).toBeUndefined()
 
-			expect(status.windowStart).toBe(0);
-			expect(status.windowEnd).toBe(1000);
-			expect(status.used).toBe(0);
-			expect(status.reserved).toBe(0);
-			expect(status.remaining).toBe(10);
-			expect(status.nextAvailableAt).toBe(0);
-			expect(status.resetAt).toBe(1000);
-		});
+		expect(policy.getStatus(state, 2500).profiles[0]).toEqual({
+			window: { start: 2500, end: 3500 },
+			limit: 3,
+			used: 2,
+			remaining: 1,
+		})
+	})
 
-		it('should return correct timing when queue is partially filled', () => {
-			const state = { windowStart: 0, used: 10, reserved: 5 };
-			const info = policy.getStatus(state, 500);
+	it('should admit a full grid window on either side of a boundary', () => {
+		const policy = new FixedWindowPolicy([
+			{ alignment: 'grid', limit: 2, windowMs: 1000 },
+		])
 
-			expect(info.nextAvailableAt).toBe(1000);
-			expect(info.resetAt).toBe(2000);
-		});
+		expect(policy.getStatus(undefined, 999).profiles[0]).toEqual({
+			window: { start: 0, end: 1000 },
+			limit: 2,
+			used: 0,
+			remaining: 2,
+		})
 
-		it('should return correct timing when multiple windows are blocked', () => {
-			const state = { windowStart: 0, used: 10, reserved: 25 };
-			const info = policy.getStatus(state, 500);
+		let state = chargeStart(policy, undefined, 999)
+		state = chargeStart(policy, state, 999)
+		expect(policy.check(state, 999)).toBe(1000)
 
-			expect(info.nextAvailableAt).toBe(3000);
-			expect(info.resetAt).toBe(4000);
-		});
-	});
+		state = chargeStart(policy, state, 1000)
+		state = chargeStart(policy, state, 1000)
+		expect(policy.check(state, 1000)).toBe(2000)
+		expect(policy.getStatus(state, 1000).profiles[0]?.window).toEqual({ start: 1000, end: 2000 })
+	})
 
-	describe('Evaluate', () => {
-		describe('Validation and Edge Cases', () => {
-			const policy = new FixedWindowPolicy(10, 1000);
+	it.each(['first-start', 'grid'] as const)('should discard unused quota at a %s window boundary', alignment => {
+		const policy = new FixedWindowPolicy([
+			{ alignment, limit: 2, windowMs: 1000 },
+		])
+		const state = chargeStart(policy, undefined, 0)
+		expect(policy.getStatus(state, 999).profiles[0]?.remaining).toBe(1)
+		expect(policy.getStatus(state, 1000).profiles[0]?.remaining).toBe(2)
 
-			it('should throw if cost exceeds the policy limit', () => {
-				const state = policy.getInitialState();
-				expect(() => policy.evaluate(state, 500, 15)).toThrow(InvalidCostError);
-			});
+		const next = chargeStart(policy, state, 1000)
+		const filled = chargeStart(policy, next, 1000)
+		expect(policy.check(filled, 1000)).toBe(2000)
+	})
 
-			it('should allow zero cost without consuming tokens (status check)', () => {
-				const state = { windowStart: 0, used: 5, reserved: 0 };
-				const result = policy.evaluate(state, 500, 0);
+	it('should align timestamps before the offset to the preceding grid window', () => {
+		const policy = new FixedWindowPolicy([
+			{
+				alignment: 'grid',
+				offsetMs: 25,
+				limit: 1,
+				windowMs: 1000,
+			},
+		])
+		let state = chargeStart(policy, undefined, 0)
 
-				expect(result.decision.kind).toBe('allow');
-				expect(result.nextState.used).toBe(5);
-			});
+		expect(policy.getStatus(state, 0).profiles[0]?.window).toEqual({ start: -975, end: 25 })
+		expect(policy.check(state, 24)).toBe(25)
+		state = chargeStart(policy, state, 25)
+		expect(policy.check(state, 25)).toBe(1025)
+	})
 
-			it('should handle time jumping backwards gracefully', () => {
-				const state = { windowStart: 5000, used: 5, reserved: 0 };
-				const result = policy.evaluate(state, 4000, 1);
+	it('should retain fractional grid boundaries', () => {
+		const policy = new FixedWindowPolicy([
+			{ alignment: 'grid', limit: 1, windowMs: 0.25 },
+		])
+		let state = chargeStart(policy, undefined, 0.125)
 
-				expect(result.decision.kind).toBe('allow');
-				expect(result.nextState.windowStart).toBe(5000);
-				expect(result.nextState.used).toBe(6);
-			});
-		});
+		expect(policy.check(state, 0.125)).toBe(0.25)
+		state = chargeStart(policy, state, 0.25)
+		expect(policy.check(state, 0.25)).toBe(0.5)
+	})
 
-		describe('Immediate execution', () => {
-			const policy = new FixedWindowPolicy(2, 1000);
+	it.each([-0.125, 0.375, 1.375])('should preserve the same grid for an equivalent fractional offset of %s', offsetMs => {
+		const policy = new FixedWindowPolicy([
+			{
+				alignment: 'grid',
+				limit: 1,
+				windowMs: 0.5,
+				offsetMs,
+			},
+		])
+		let state = chargeStart(policy, undefined, -0.25)
 
-			it('should allow request when within limit', () => {
-				const state = policy.getInitialState();
-				const result = policy.evaluate(state, 500, 1);
+		expect(policy.getStatus(state, -0.25).profiles[0]?.window).toEqual({ start: -0.625, end: -0.125 })
+		expect(policy.check(state, -0.25)).toBe(-0.125)
+		state = chargeStart(policy, state, -0.125)
+		expect(policy.getStatus(state, -0.125).profiles[0]?.window).toEqual({ start: -0.125, end: 0.375 })
+		expect(policy.check(state, -0.125)).toBe(0.375)
+	})
 
-				expect(result.decision).toEqual({ kind: 'allow' });
-				expect(result.nextState).toEqual({ windowStart: 0, used: 1, reserved: 0 });
-			});
+	it.each(['first-start', 'grid'] as const)('should retain %s usage across clock rollback', alignment => {
+		const policy = new FixedWindowPolicy([
+			{ alignment, limit: 1, windowMs: 1000 },
+		])
+		let state = chargeStart(policy, undefined, 0)
+		state = chargeStart(policy, state, 1000)
 
-			it('should allow request with multi-token cost if within limit', () => {
-				const state = policy.getInitialState();
-				const result = policy.evaluate(state, 500, 2);
+		expect(policy.check(state, 0)).toBe(2000)
 
-				expect(result.decision).toEqual({ kind: 'allow' });
-				expect(result.nextState).toEqual({ windowStart: 0, used: 2, reserved: 0 });
-			});
+		expect(policy.getStatus(state, 0)).toEqual({
+			nextAvailableAt: 2000,
+			profiles: [
+				{
+					window: { start: 1000, end: 2000 },
+					limit: 1,
+					used: 1,
+					remaining: 0,
+				},
+			],
+		})
+	})
 
-			it('should deny request and return correct retryAt when limit is exceeded', () => {
-				const state = { windowStart: 0, used: 2, reserved: 0 };
-				const result = policy.evaluate(state, 500, 1);
+	it('should admit a start at a rounded fractional grid boundary', () => {
+		const policy = new FixedWindowPolicy([
+			{ alignment: 'grid', limit: 1, windowMs: 1.1 },
+		])
+		let state = chargeStart(policy, undefined, 16)
 
-				expect(result.decision).toEqual({ kind: 'deny', retryAt: 1000 });
-				expect(result.nextState).toEqual(state);
-			});
-		});
+		expect(policy.check(state, 16)).toBe(16.5)
+		state = chargeStart(policy, state, 16.5)
+		expect(policy.getStatus(state, 16.5).profiles[0]?.window?.start).toBe(16.5)
+		expect(policy.check(state, 16.5)).toBe(17.6)
+	})
 
-		describe('Reservation and Delay', () => {
-			const policy = new FixedWindowPolicy(2, 1000, 5);
+	it('should leave later admission unchanged after observing a future window', () => {
+		const policy = new FixedWindowPolicy([
+			{ limit: 1, windowMs: 1000 },
+		])
+		const observed = chargeStart(policy, undefined, 100)
+		const unobserved = chargeStart(policy, undefined, 100)
 
-			it('should delay request when limit is exceeded and reservation is requested', () => {
-				const state = { windowStart: 0, used: 2, reserved: 0 };
-				const result = policy.evaluate(state, 500, 1, true);
+		expect(policy.getStatus(observed, 2500)).toEqual({
+			nextAvailableAt: 2500,
+			profiles: [
+				{
+					window: null,
+					limit: 1,
+					used: 0,
+					remaining: 1,
+				},
+			],
+		})
 
-				expect(result.decision).toEqual({ kind: 'delay', runAt: 1000 });
-				expect(result.nextState).toEqual({ windowStart: 0, used: 2, reserved: 1 });
-			});
+		expect(policy.check(observed, 500)).toBe(1100)
+		expect(policy.check(observed, 500)).toBe(policy.check(unobserved, 500))
 
-			it('should calculate correct runAt for delayed requests across multiple future windows', () => {
-				const state = { windowStart: 0, used: 2, reserved: 1 };
-				const result1 = policy.evaluate(state, 500, 1, true);
-				const result2 = policy.evaluate(result1.nextState, 500, 1, true);
+		expect(policy.getStatus(chargeStart(policy, observed, 1100), 1100)).toEqual(
+			policy.getStatus(chargeStart(policy, unobserved, 1100), 1100),
+		)
+	})
 
-				expect(result1.decision).toEqual({ kind: 'delay', runAt: 1000 });
-				expect(result2.decision).toEqual({ kind: 'delay', runAt: 2000 });
-				expect(result2.nextState.reserved).toBe(3);
-			});
+	it('should keep all profiles intact when the longer profile denies a start', () => {
+		const policy = new FixedWindowPolicy([
+			{ limit: 1, windowMs: 1000 },
+			{ limit: 1, windowMs: 5000 },
+		])
+		let state = chargeStart(policy, undefined, 100)
+		const beforeDenial = structuredClone(state)
 
-			it('should deny reservation if maxReserved is exceeded', () => {
-				const state = { windowStart: 0, used: 2, reserved: 4 };
-				const result = policy.evaluate(state, 500, 2, true);
+		expect(policy.check(state, 100)).toBe(5100)
+		expect(policy.check(state, 1200)).toBe(5100)
+		expect(state).toEqual(beforeDenial)
 
-				expect(result.decision.kind).toBe('deny');
-				expect(result.nextState).toEqual(state);
-			});
+		expect(policy.getStatus(state, 1200)).toEqual({
+			nextAvailableAt: 5100,
+			profiles: [
+				{
+					window: null,
+					limit: 1,
+					used: 0,
+					remaining: 1,
+				},
+				{
+					window: { start: 100, end: 5100 },
+					limit: 1,
+					used: 1,
+					remaining: 0,
+				},
+			],
+		})
 
-			it('should exactly calculate retryAt when maxReserved is exceeded (deficit logic)', () => {
-				const fixedWindowPolicy = new FixedWindowPolicy(10, 1000, 20);
-				const state = { windowStart: 0, used: 10, reserved: 20 };
-				const result = fixedWindowPolicy.evaluate(state, 500, 5, true);
+		state = chargeStart(policy, state, 5100)
 
-				expect(result.decision).toEqual({ kind: 'deny', retryAt: 1000 });
-			});
-		});
+		expect(policy.getStatus(state, 5100).profiles).toEqual([
+			{
+				window: { start: 5100, end: 6100 },
+				limit: 1,
+				used: 1,
+				remaining: 0,
+			},
+			{
+				window: { start: 5100, end: 10_100 },
+				limit: 1,
+				used: 1,
+				remaining: 0,
+			},
+		])
+	})
 
-		describe('Window Transitions and State Sync', () => {
-			const policy = new FixedWindowPolicy(10, 1000);
+	it('should charge both profiles when one rolls over and the other stays active', () => {
+		const policy = new FixedWindowPolicy([
+			{ limit: 2, windowMs: 5000 },
+			{ alignment: 'grid', limit: 1, windowMs: 1000 },
+		])
+		const otherKey = chargeStart(policy, undefined, 100)
+		let state = chargeStart(policy, undefined, 100)
 
-			it('should completely reset used count when moving to a new window without debt', () => {
-				const state = { windowStart: 0, used: 10, reserved: 0 };
-				const result = policy.evaluate(state, 1500, 1);
+		state = chargeStart(policy, state, 1000)
+		expect(policy.check(state, 1000)).toBe(5100)
 
-				expect(result.decision.kind).toBe('allow');
-				expect(result.nextState).toEqual({ windowStart: 1000, used: 1, reserved: 0 });
-			});
+		expect(policy.getStatus(state, 1000)).toEqual({
+			nextAvailableAt: 5100,
+			profiles: [
+				{
+					window: { start: 100, end: 5100 },
+					limit: 2,
+					used: 2,
+					remaining: 0,
+				},
+				{
+					window: { start: 1000, end: 2000 },
+					limit: 1,
+					used: 1,
+					remaining: 0,
+				},
+			],
+		})
 
-			it('should carry over reserved requests into used count of the next window', () => {
-				const state = { windowStart: 0, used: 10, reserved: 5 };
-				const result = policy.evaluate(state, 1500, 1, true);
+		expect(policy.check(otherKey, 1000)).toBeUndefined()
+	})
 
-				expect(result.decision.kind).toBe('allow');
-				expect(result.nextState).toEqual({ windowStart: 1000, used: 6, reserved: 0 });
-			});
+	it('should reject invalid quota configuration', () => {
+		expect(() => new FixedWindowPolicy([])).toThrow(RangeError)
 
-			it('should burn passed windows and correctly allocate remaining debt into current window', () => {
-				const state = { windowStart: 0, used: 10, reserved: 25 };
-				const result = policy.evaluate(state, 2500, 1, true);
+		expect(() => new FixedWindowPolicy([
+			{ limit: 0.5, windowMs: 1000 },
+		])).toThrow(RangeError)
 
-				expect(result.nextState).toEqual({ windowStart: 2000, used: 10, reserved: 6 });
-			});
-		});
-	});
+		expect(() => new FixedWindowPolicy([
+			{ limit: 1, windowMs: 0 },
+		])).toThrow(RangeError)
 
-	describe('Revert', () => {
-		const policy = new FixedWindowPolicy(10, 1000);
-
-		describe('Within the same window', () => {
-			it('should revert only used when reserved is empty', () => {
-				const state = { windowStart: 1000, used: 5, reserved: 0 };
-				const nextState = policy.revert(state, 2, 1500);
-
-				expect(nextState).toEqual({ windowStart: 1000, used: 3, reserved: 0 });
-			});
-
-			it('should revert from reserved first', () => {
-				const state = { windowStart: 1000, used: 10, reserved: 5 };
-				const nextState = policy.revert(state, 3, 1500);
-
-				expect(nextState).toEqual({ windowStart: 1000, used: 10, reserved: 2 });
-			});
-
-			it('should revert from both reserved and used if cost spans across both', () => {
-				const state = { windowStart: 1000, used: 10, reserved: 2 };
-				const nextState = policy.revert(state, 5, 1500);
-
-				expect(nextState).toEqual({ windowStart: 1000, used: 7, reserved: 0 });
-			});
-
-			it('should not drop used or reserved below zero', () => {
-				const state = { windowStart: 1000, used: 2, reserved: 0 };
-				const nextState = policy.revert(state, 10, 1500);
-
-				expect(nextState).toEqual({ windowStart: 1000, used: 0, reserved: 0 });
-			});
-		});
-
-		describe('With time sync (window transitions)', () => {
-			it('should sync state and clear used capacity when moving to an empty new window before reverting', () => {
-				const state = { windowStart: 0, used: 10, reserved: 0 };
-				const nextState = policy.revert(state, 2, 1500);
-
-				expect(nextState).toEqual({ windowStart: 1000, used: 0, reserved: 0 });
-			});
-
-			it('should sync state, carry over reserved to used, and then apply revert', () => {
-				const state = { windowStart: 0, used: 10, reserved: 5 };
-				const nextState = policy.revert(state, 2, 1500);
-
-				expect(nextState).toEqual({ windowStart: 1000, used: 3, reserved: 0 });
-			});
-
-			it('should burn passed windows, correctly allocate remaining debt, and then apply revert', () => {
-				const state = { windowStart: 0, used: 10, reserved: 25 };
-				const nextState = policy.revert(state, 7, 2500);
-
-				expect(nextState).toEqual({ windowStart: 2000, used: 8, reserved: 0 });
-			});
-
-			it('should handle exact window boundary sync before reverting', () => {
-				const state = { windowStart: 0, used: 10, reserved: 15 };
-				const nextState = policy.revert(state, 5, 1000);
-
-				expect(nextState).toEqual({ windowStart: 1000, used: 10, reserved: 0 });
-			});
-
-			it('should gracefully handle time jumping backwards during revert', () => {
-				const state = { windowStart: 5000, used: 5, reserved: 0 };
-				const nextState = policy.revert(state, 2, 4000);
-
-				expect(nextState).toEqual({ windowStart: 5000, used: 3, reserved: 0 });
-			});
-		});
-	});
-});
+		expect(() => new FixedWindowPolicy([
+			{
+				alignment: 'grid',
+				limit: 1,
+				windowMs: 1000,
+				offsetMs: Number.NaN,
+			},
+		])).toThrow(RangeError)
+	})
+})

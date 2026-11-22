@@ -1,10 +1,12 @@
-/**
- * Sliding Window Counter rate limiter state.
- *
- * When using a distributed state store, make sure it properly serializes and deserializes the state.
- */
-export interface SlidingWindowCounterState {
-	windowStart: number;
-	currentCount: number;
-	previousCount: number;
+/** @internal */
+export interface WindowCounts {
+	readonly index: bigint
+	readonly windowStart: bigint
+	readonly currentCount: number
+	readonly previousCount: number
+}
+
+/** @internal */
+export interface SlidingWindowCounterState extends WindowCounts {
+	readonly nextAvailableAt: number
 }

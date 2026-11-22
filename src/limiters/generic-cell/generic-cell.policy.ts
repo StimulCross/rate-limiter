@@ -1,115 +1,118 @@
-import { type GenericCellState } from './generic-cell.state.js';
-import { type GenericCellStatus } from './generic-cell.status.js';
-import { type RateLimitPolicy, type RateLimitPolicyResult } from '../../core/rate-limit-policy.js';
-import { validateCost } from '../../utils/validate-cost.js';
+import type { RateLimitPolicy } from '../../contracts/rate-limit-policy.js'
+import type { GenericCellLimitOptions } from './generic-cell.options.js'
+import type { GenericCellState } from './generic-cell.state.js'
+import type { GenericCellStatus } from './generic-cell.status.js'
+import { getNextTimestamp } from '../../utils/next-timestamp.js'
+
+interface GenericCellProfile extends GenericCellLimitOptions {
+	readonly interval: bigint
+	readonly tolerance: bigint
+}
 
 /** @internal */
 export class GenericCellPolicy implements RateLimitPolicy<GenericCellState, GenericCellStatus> {
-	constructor(
-		private readonly _intervalMs: number,
-		private readonly _burst: number,
-		private readonly _maxDelayMs: number = Number.POSITIVE_INFINITY,
-	) {
-		if (!Number.isFinite(_intervalMs) || !Number.isSafeInteger(_intervalMs) || _intervalMs <= 0) {
-			throw new Error(`Invalid intervalMs: ${_intervalMs}. Must be a positive integer.`);
-		}
+	private readonly _profiles: readonly GenericCellProfile[]
 
-		if (!Number.isFinite(_burst) || !Number.isSafeInteger(_burst) || _burst <= 0) {
-			throw new Error(`Invalid burst: ${_burst}. Must be a positive integer.`);
-		}
+	constructor(profiles: readonly GenericCellLimitOptions[]) {
+		if (profiles.length === 0)
+			throw new RangeError('Generic Cell requires at least one profile')
 
-		if (_maxDelayMs < 0 || (!Number.isSafeInteger(_maxDelayMs) && _maxDelayMs !== Number.POSITIVE_INFINITY)) {
-			throw new Error(`Invalid maxDelayMs: ${_maxDelayMs}. Must be a non-negative integer or Infinity.`);
-		}
-	}
+		this._profiles = profiles.map(({ intervalMs, burst }) => {
+			if (!Number.isSafeInteger(intervalMs) || intervalMs <= 0)
+				throw new RangeError('Generic Cell interval must be a positive safe integer')
 
-	public get burst(): number {
-		return this._burst;
-	}
+			if (!Number.isSafeInteger(burst) || burst <= 0)
+				throw new RangeError('Generic Cell burst must be a positive safe integer')
 
-	public get intervalMs(): number {
-		return this._intervalMs;
-	}
+			const interval = BigInt(intervalMs)
 
-	public getInitialState(): GenericCellState {
-		return { tat: 0 };
-	}
-
-	public getStatus(state: GenericCellState, now: number): GenericCellStatus {
-		const tat = Math.max(state.tat, now);
-		const burstOffset = this._burst * this._intervalMs;
-
-		const availableTimeDebt = burstOffset + now - tat;
-		const remaining = Math.max(0, Math.floor(availableTimeDebt / this._intervalMs));
-
-		const nextAvailableAt = Math.max(now, tat + this._intervalMs - burstOffset);
-
-		const resetAt = tat;
-
-		return {
-			intervalMs: this._intervalMs,
-			burst: this._burst,
-			tat,
-			remaining,
-			nextAvailableAt,
-			resetAt,
-		};
-	}
-
-	public evaluate(
-		state: GenericCellState,
-		now: number,
-		cost: number,
-		shouldReserve?: boolean,
-	): RateLimitPolicyResult<GenericCellState> {
-		const absoluteMax = shouldReserve ? this._burst + Math.floor(this._maxDelayMs / this._intervalMs) : this._burst;
-
-		validateCost(cost, absoluteMax);
-
-		const tat = Math.max(state.tat, now);
-		const costInterval = cost * this._intervalMs;
-		const burstOffset = this._burst * this._intervalMs;
-
-		const newTat = tat + costInterval;
-
-		const minNow = newTat - burstOffset;
-
-		if (now >= minNow) {
 			return {
-				decision: { kind: 'allow' },
-				nextState: { tat: newTat },
-			};
-		}
+				intervalMs,
+				burst,
+				interval,
+				tolerance: BigInt(burst - 1) * interval,
+			}
+		})
+	}
 
-		if (shouldReserve) {
-			const waitMs = minNow - now;
+	public check(state: GenericCellState | undefined, time: number): number | undefined {
+		const nextAvailableAt = state?.nextAvailableAt
 
-			if (waitMs > this._maxDelayMs) {
-				const retryAt = minNow - this._maxDelayMs;
-				return this._deny(state.tat, retryAt);
+		return nextAvailableAt !== undefined && nextAvailableAt > time
+			? nextAvailableAt
+			: undefined
+	}
+
+	public charge(state: GenericCellState | undefined, time: number): GenericCellState {
+		const current = state ?? { arrivals: [], nextAvailableAt: time }
+		const rounded = Math.round(time)
+		const whole = BigInt(rounded)
+		const fraction = time - rounded
+		let nextAvailableAt = time
+
+		for (const [index, { interval, tolerance }] of this._profiles.entries()) {
+			const arrival = current.arrivals[index] ?? { whole, fraction }
+
+			if (arrival.whole < whole || (arrival.whole === whole && arrival.fraction < fraction)) {
+				arrival.whole = whole
+				arrival.fraction = fraction
 			}
 
-			const runAt = minNow;
-			return {
-				decision: { kind: 'delay', runAt },
-				nextState: { tat: newTat },
-			};
+			arrival.whole += interval
+			current.arrivals[index] = arrival
+			const availableAt = this._roundUpTimestamp(arrival.whole - tolerance, arrival.fraction)
+			nextAvailableAt = Math.max(nextAvailableAt, availableAt)
 		}
 
-		return this._deny(state.tat, minNow);
+		current.nextAvailableAt = nextAvailableAt
+
+		return current
 	}
 
-	public revert(state: GenericCellState, cost: number): GenericCellState {
-		const costInterval = cost * this._intervalMs;
-		return {
-			tat: Math.max(0, state.tat - costInterval),
-		};
+	public getStatus(state: GenericCellState | undefined, time: number): GenericCellStatus {
+		const rounded = Math.round(time)
+		const whole = BigInt(rounded)
+		const fraction = time - rounded
+		const profiles = this._profiles.map(({ intervalMs, burst, interval }, index) => {
+			const arrival = state?.arrivals[index]
+
+			if (arrival === undefined) {
+				return {
+					intervalMs,
+					burst,
+					tat: null,
+					remaining: burst,
+				}
+			}
+
+			const debt = arrival.whole - whole
+			const adjustment = arrival.fraction > fraction ? interval : interval - 1n
+			const consumed = debt < 0n ? 0n : (debt + adjustment) / interval
+
+			return {
+				intervalMs,
+				burst,
+				tat: this._roundUpTimestamp(arrival.whole, arrival.fraction),
+				remaining: burst - Number(consumed),
+			}
+		})
+
+		return { nextAvailableAt: this.check(state, time) ?? time, profiles }
 	}
 
-	private _deny(tat: number, retryAt: number): RateLimitPolicyResult<GenericCellState> {
-		return {
-			decision: { kind: 'deny', retryAt },
-			nextState: { tat },
-		};
+	private _roundUpTimestamp(whole: bigint, fraction: number): number {
+		const rounded = Number(whole)
+
+		if (!Number.isFinite(rounded))
+			return rounded
+
+		const roundedWhole = BigInt(rounded)
+
+		if (roundedWhole !== whole)
+			return roundedWhole < whole ? getNextTimestamp(rounded) : rounded
+
+		const timestamp = rounded + fraction
+
+		return timestamp - rounded < fraction ? getNextTimestamp(timestamp) : timestamp
 	}
 }

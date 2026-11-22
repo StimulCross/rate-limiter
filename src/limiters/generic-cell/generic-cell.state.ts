@@ -1,8 +1,11 @@
-/**
- * Generic Cell rate limiter state.
- *
- * When using a distributed state store, make sure it properly serializes and deserializes the state.
- */
+/** @internal */
+export interface ArrivalTime {
+	whole: bigint
+	fraction: number
+}
+
+/** @internal */
 export interface GenericCellState {
-	tat: number;
+	readonly arrivals: ArrivalTime[]
+	nextAvailableAt: number
 }

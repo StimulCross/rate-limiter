@@ -1,388 +1,372 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { type Clock, RateLimiterDestroyedError, RateLimitErrorCode } from '../../../src/index.js';
-import { LeakyBucketLimiter, type LeakyBucketState } from '../../../src/limiters/leaky-bucket/index.js';
-import { InMemoryStateStore } from '../../../src/runtime/in-memory-state-store.js';
+import type { RateLimiterOptions } from '../../../src/index.js'
+import { LogLevel } from '@stimulcross/logger'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { RateLimitErrorCode } from '../../../src/index.js'
+import { LeakyBucketLimiter } from '../../../src/limiters/leaky-bucket/index.js'
 
-describe('LeakyBucketLimiter (Integration)', () => {
-	let clock: Clock;
-	let store: InMemoryStateStore<LeakyBucketState>;
-
-	beforeEach(() => {
-		vi.useFakeTimers();
-		vi.setSystemTime(10_000);
-
-		clock = { now: () => Date.now() };
-		store = new InMemoryStateStore(clock);
-	});
-
+describe('Leaky Bucket', () => {
 	afterEach(() => {
-		vi.clearAllTimers();
-		vi.useRealTimers();
-	});
-
-	describe('Reject mode (immediate decisions)', () => {
-		it('should allow requests within the capacity immediately', async () => {
-			const limiter = new LeakyBucketLimiter({
-				limitBehavior: 'reject',
-				capacity: 2,
-				leakRate: 10,
-				clock,
-				store,
-			});
-
-			const res1 = await limiter.run(async () => 'A');
-			const res2 = await limiter.run(async () => 'B');
-
-			expect(res1).toBe('A');
-			expect(res2).toBe('B');
-		});
-
-		it('should reject requests that exceed the capacity if behavior is "reject"', async () => {
-			const limiter = new LeakyBucketLimiter({
-				limitBehavior: 'reject',
-				capacity: 1,
-				leakRate: 10,
-				clock,
-				store,
-			});
-
-			await limiter.run(() => 'A');
-
-			const promise = limiter.run(() => 'B');
-			await expect(promise).rejects.toMatchObject({ code: RateLimitErrorCode.LimitExceeded });
-		});
-
-		it('should consume multiple units of capacity if cost > 1', async () => {
-			const limiter = new LeakyBucketLimiter({
-				limitBehavior: 'reject',
-				capacity: 5,
-				leakRate: 10,
-				clock,
-				store,
-			});
-
-			await expect(limiter.run(() => 'A', { cost: 3 })).resolves.toBe('A');
-			await expect(limiter.run(() => 'B', { cost: 3 })).rejects.toMatchObject({
-				code: RateLimitErrorCode.LimitExceeded,
-			});
-		});
-
-		it('should allow new requests after space is freed (leaked)', async () => {
-			const limiter = new LeakyBucketLimiter({
-				limitBehavior: 'reject',
-				capacity: 1,
-				leakRate: 10,
-				clock,
-				store,
-			});
-
-			await limiter.run(() => 'A');
-			await expect(limiter.run(() => 'B')).rejects.toMatchObject({ code: RateLimitErrorCode.LimitExceeded });
-
-			// wait for 1 unit to leak
-			await vi.advanceTimersByTimeAsync(100);
-
-			await expect(limiter.run(() => 'C')).resolves.toBe('C');
-		});
-	});
-
-	describe('Enqueue mode (queueing & scheduling)', () => {
-		it('should delay request and execute it when enough space is leaked', async () => {
-			const limiter = new LeakyBucketLimiter({
-				limitBehavior: 'enqueue',
-				capacity: 1,
-				leakRate: 10,
-				clock,
-				store,
-			});
-
-			void limiter.run(() => 'A');
-
-			const pBSpy = vi.fn().mockReturnValue('B');
-			// delay 100ms
-			const pB = limiter.run<unknown>(pBSpy);
-
-			expect(pBSpy).not.toHaveBeenCalled();
-
-			await vi.advanceTimersByTimeAsync(100);
-
-			const result = await pB;
-			expect(pBSpy).toHaveBeenCalledOnce();
-			expect(result).toBe('B');
-		});
-
-		it('should maintain order and timings for multiple queued requests', async () => {
-			const limiter = new LeakyBucketLimiter({
-				limitBehavior: 'enqueue',
-				capacity: 1,
-				leakRate: 10,
-				clock,
-				store,
-			});
-
-			void limiter.run(() => {});
-
-			const results: string[] = [];
-			const push = (val: string) => () => results.push(val);
-
-			// delay +100ms for each task
-			const pA = limiter.run(push('A'));
-			const pB = limiter.run(push('B'));
-			const pC = limiter.run(push('C'));
-
-			await vi.advanceTimersByTimeAsync(100);
-			await pA;
-			expect(results).toEqual(['A']);
-
-			await vi.advanceTimersByTimeAsync(100);
-			await pB;
-			expect(results).toEqual(['A', 'B']);
-
-			await vi.advanceTimersByTimeAsync(100);
-			await pC;
-			expect(results).toEqual(['A', 'B', 'C']);
-		});
-
-		it('should reject with QueueOverflow if executor queue exceeds maxSize', async () => {
-			const limiter = new LeakyBucketLimiter({
-				limitBehavior: 'enqueue',
-				capacity: 1,
-				leakRate: 10,
-				queue: { capacity: 1 },
-				clock,
-				store,
-			});
-
-			const pA = limiter.run(() => 'A');
-			const pB = limiter.run(() => 'B');
-			await vi.advanceTimersByTimeAsync(0);
-
-			// overflow
-			const pC = limiter.run(() => 'C');
-
-			await expect(pC).rejects.toMatchObject({ code: RateLimitErrorCode.QueueOverflow });
-
-			await vi.advanceTimersByTimeAsync(0);
-			await expect(pA).resolves.toBe('A');
-
-			await vi.advanceTimersByTimeAsync(100);
-			await expect(pB).resolves.toBe('B');
-		});
-
-		it('should execute queued tasks based on priority order', async () => {
-			const limiter = new LeakyBucketLimiter({
-				limitBehavior: 'enqueue',
-				capacity: 1,
-				leakRate: 10,
-				clock,
-				store,
-			});
-
-			await limiter.run(() => 'A');
-
-			const order: string[] = [];
-
-			void limiter.run(() => order.push('Lowest'), { priority: 1 });
-			void limiter.run(() => order.push('Highest'), { priority: 5 });
-
-			await vi.advanceTimersByTimeAsync(200);
-
-			expect(order).toEqual(['Highest', 'Lowest']);
-		});
-
-		it('should enqueue the task and reject it with Expired when TTL is reached', async () => {
-			const limiter = new LeakyBucketLimiter({
-				limitBehavior: 'enqueue',
-				capacity: 1,
-				leakRate: 10,
-				queue: { maxWaitMs: 150 },
-				clock,
-				store,
-			});
-
-			const pA = limiter.run(() => 'A');
-			// delay 100ms
-			const pB = limiter.run(() => 'B');
-			// delay 200ms, expires after 150ms
-			const pC = limiter.run(() => 'C');
-			pC.catch(() => {});
-
-			await expect(pA).resolves.toBe('A');
-
-			await vi.advanceTimersByTimeAsync(100);
-			await expect(pB).resolves.toBe('B');
-
-			await vi.advanceTimersByTimeAsync(50);
-			await expect(pC).rejects.toMatchObject({ code: RateLimitErrorCode.Expired });
-		});
-
-		it('should free up the canceled ticket for new requests', async () => {
-			const limiter = new LeakyBucketLimiter({
-				limitBehavior: 'enqueue',
-				capacity: 1,
-				leakRate: 10,
-				clock,
-				store,
-			});
-
-			const pA = limiter.run(() => 'A');
-
-			const controllerB = new AbortController();
-			// delay 100ms
-			const pB = limiter.run(() => 'B', { signal: controllerB.signal });
-
-			const spyC = vi.fn().mockReturnValue('C');
-			// delay 200ms
-			const pC = limiter.run(spyC);
-
-			await vi.advanceTimersByTimeAsync(0);
-
-			// canceling B
-			// the 200ms ticket should be freed up, the consumed token should be returned to the bucket
-			controllerB.abort();
-			await expect(pB).rejects.toMatchObject({ code: RateLimitErrorCode.Cancelled });
-
-			const spyD = vi.fn().mockReturnValue('D');
-			// delay 200ms (it was freed up by canceling B)
-			const pD = limiter.run(spyD);
-
-			await expect(pA).resolves.toBe('A');
-			expect(spyC).not.toHaveBeenCalled();
-			expect(spyD).not.toHaveBeenCalled();
-
-			// t = 10_100
-			// C takes the 100ms ticket created by B
-			await vi.advanceTimersByTimeAsync(100);
-
-			await expect(pC).resolves.toBe('C');
-			expect(spyC).toHaveBeenCalledOnce();
-			expect(spyD).not.toHaveBeenCalled();
-
-			// t = 10_200
-			// D takes the 200ms ticket created by itself
-			await vi.advanceTimersByTimeAsync(100);
-
-			await expect(pD).resolves.toBe('D');
-			expect(spyD).toHaveBeenCalledOnce();
-		});
-
-		it('should force enqueue task even if queue is full when shouldForceEnqueue is true', async () => {
-			const limiter = new LeakyBucketLimiter({
-				limitBehavior: 'enqueue',
-				capacity: 1,
-				leakRate: 10,
-				queue: { capacity: 1 },
-				clock,
-				store,
-			});
-
-			void limiter.run(() => {});
-
-			const taskA = vi.fn().mockResolvedValue('A');
-			const taskB = vi.fn().mockResolvedValue('B');
-			const taskC = vi.fn().mockResolvedValue('C');
-
-			const pA = limiter.run(taskA, { id: 'A' });
-			const pB = limiter.run(taskB, { id: 'B', shouldForceEnqueue: false });
-
-			await expect(pB).rejects.toMatchObject({ code: RateLimitErrorCode.QueueOverflow });
-
-			const pC = limiter.run(taskC, { id: 'C', shouldForceEnqueue: true });
-
-			await vi.advanceTimersByTimeAsync(100);
-
-			expect(taskA).toHaveBeenCalledOnce();
-			await expect(pA).resolves.toBe('A');
-
-			await vi.advanceTimersByTimeAsync(100);
-
-			expect(taskC).toHaveBeenCalledOnce();
-			await expect(pC).resolves.toBe('C');
-		});
-	});
-
-	describe('Runtime overrides', () => {
-		it('should allow overriding limitBehavior per task', async () => {
-			const limiter = new LeakyBucketLimiter({
-				limitBehavior: 'reject',
-				capacity: 1,
-				leakRate: 10,
-				clock,
-				store,
-			});
-
-			await limiter.run(() => 'A');
-			const pB = limiter.run(() => 'B', { limitBehavior: 'enqueue' });
-
-			await vi.advanceTimersByTimeAsync(100);
-			await expect(pB).resolves.toBe('B');
-		});
-
-		it('should override max wait time for a specific task and expire it independently', async () => {
-			const limiter = new LeakyBucketLimiter({
-				limitBehavior: 'enqueue',
-				capacity: 1,
-				leakRate: 10,
-				queue: { maxWaitMs: 5000 },
-				clock,
-				store,
-			});
-
-			void limiter.run(() => 'A');
-
-			// delay 100ms
-			const pB = limiter.run(() => 'B');
-
-			// delay 200ms
-			// expires after 150ms, so it should be rejected
-			const pC = limiter.run(() => 'C', { maxWaitMs: 150 });
-			pC.catch(() => {});
-
-			// delay 300ms
-			const pD = limiter.run(() => 'D', { maxWaitMs: 400 });
-
-			// t=10_100
-			await vi.advanceTimersByTimeAsync(100);
-			await expect(pB).resolves.toBe('B');
-
-			// t=10_150
-			await vi.advanceTimersByTimeAsync(50);
-			await expect(pC).rejects.toMatchObject({ code: RateLimitErrorCode.Expired });
-
-			// t=10_300
-			await vi.advanceTimersByTimeAsync(150);
-			await expect(pD).resolves.toBe('D');
-		});
-	});
-
-	describe('State lifecycle', () => {
-		it('should reset limits and clear queued tasks on clear()', async () => {
-			const limiter = new LeakyBucketLimiter({
-				limitBehavior: 'reject',
-				capacity: 1,
-				leakRate: 10,
-				clock,
-				store,
-			});
-
-			await limiter.run(() => 'A');
-
-			await limiter.clear();
-
-			await expect(limiter.run(() => 'B')).resolves.toBe('B');
-		});
-
-		it('should throw RateLimiterDestroyedError after destroy() is called', async () => {
-			const limiter = new LeakyBucketLimiter({
-				capacity: 5,
-				leakRate: 10,
-				clock,
-				store,
-			});
-
-			await limiter.destroy();
-
-			await expect(limiter.run(() => 'A')).rejects.toThrow(RateLimiterDestroyedError);
-		});
-	});
-});
+		vi.restoreAllMocks()
+		vi.useRealTimers()
+	})
+
+	it('should project status without recording elapsed quota time and preserve a failed start', async () => {
+		vi.setSystemTime(0)
+		const limiter = new LeakyBucketLimiter({
+			limitOptions: { intervalMs: 100 },
+		})
+		const failure = new Error('callback failed')
+
+		expect(await limiter.getStatus()).toEqual({ intervalMs: 100, lastStartedAt: null, nextAvailableAt: 0 })
+
+		await expect(limiter.run(() => {
+			throw failure
+		})).rejects.toBe(failure)
+
+		expect(await limiter.getStatus()).toEqual({ intervalMs: 100, lastStartedAt: 0, nextAvailableAt: 100 })
+
+		vi.setSystemTime(150)
+		expect(await limiter.getStatus()).toEqual({ intervalMs: 100, lastStartedAt: 0, nextAvailableAt: 150 })
+		vi.setSystemTime(50)
+
+		await expect(limiter.run(() => {})).rejects.toMatchObject({
+			code: RateLimitErrorCode.LimitExceeded,
+			retryAfterMs: 50,
+		})
+
+		vi.setSystemTime(100)
+
+		await expect(limiter.run(async () => await limiter.getStatus())).resolves.toEqual({
+			intervalMs: 100,
+			lastStartedAt: 100,
+			nextAvailableAt: 200,
+		})
+	})
+
+	it('should block an overflowing key until clear without blocking other keys', async () => {
+		vi.spyOn(Date, 'now').mockReturnValue(Number.MAX_VALUE)
+		const limiter = new LeakyBucketLimiter({
+			limitOptions: { intervalMs: Number.MIN_VALUE },
+		})
+
+		await limiter.run(() => {}, { key: 'A' })
+		expect(await limiter.getStatus('A')).toMatchObject({ lastStartedAt: Number.MAX_VALUE, nextAvailableAt: Infinity })
+
+		await expect(limiter.run(() => {}, { key: 'A' })).rejects.toMatchObject({
+			code: RateLimitErrorCode.LimitExceeded,
+			retryAfterMs: null,
+		})
+
+		await expect(limiter.run(() => 'independent', { key: 'B' })).resolves.toBe('independent')
+
+		await limiter.clear('A')
+		expect(await limiter.getStatus('A')).toMatchObject({ lastStartedAt: null, nextAvailableAt: Number.MAX_VALUE })
+		expect(await limiter.getStatus('B')).toMatchObject({ lastStartedAt: Number.MAX_VALUE, nextAvailableAt: Infinity })
+		await expect(limiter.run(() => 'reset', { key: 'A' })).resolves.toBe('reset')
+	})
+
+	it('should pace waiters from a late timer wakeup and log each committed queue transition', async () => {
+		vi.useFakeTimers({ now: 0 })
+		const output = vi.fn()
+		const limiter = new LeakyBucketLimiter({
+			limitOptions: { intervalMs: 100 },
+			limitBehavior: 'enqueue',
+			queue: { capacity: 2, concurrency: 2 },
+			loggerOptions: { minLevel: 'debug', includeIdentifiers: true, custom: output },
+		})
+		const hold = Promise.withResolvers<undefined>()
+		const first = limiter.run(async () => await hold.promise, { id: 'first', key: 'A' })
+		const second = limiter.run(Date.now, { id: 'second', key: 'A' })
+		const thirdCallback = vi.fn(Date.now)
+		const third = limiter.run(thirdCallback, { id: 'third', key: 'A' })
+
+		try {
+			// The scheduled wakeup still fires after 100 ms of elapsed time.
+			vi.setSystemTime(900)
+			await vi.advanceTimersByTimeAsync(100)
+			await expect(second).resolves.toBe(1000)
+			expect(thirdCallback).not.toHaveBeenCalled()
+			expect(await limiter.getStatus('A')).toEqual({ intervalMs: 100, lastStartedAt: 1000, nextAvailableAt: 1100 })
+
+			await vi.advanceTimersByTimeAsync(99)
+			expect(thirdCallback).not.toHaveBeenCalled()
+			await vi.advanceTimersByTimeAsync(1)
+			await expect(third).resolves.toBe(1100)
+
+			expect(output.mock.calls).toEqual([
+				[LogLevel.DEBUG, '[TASK STARTED] id="first" key="A" | source=immediate priority=Normal waiting=0 active=1'],
+				[LogLevel.DEBUG, '[TASK QUEUED] id="second" key="A" | priority=Normal waiting=1 capacity=2'],
+				[LogLevel.DEBUG, '[TASK QUEUED] id="third" key="A" | priority=Normal waiting=2 capacity=2'],
+				[LogLevel.DEBUG, '[TASK STARTED] id="second" key="A" | source=queue priority=Normal waiting=1 active=2'],
+				[LogLevel.DEBUG, '[TASK STARTED] id="third" key="A" | source=queue priority=Normal waiting=0 active=2'],
+			])
+		}
+		finally {
+			const settled = Promise.allSettled([first, second, third])
+			hold.resolve(undefined)
+			await limiter.destroy()
+			await settled
+		}
+	})
+
+	it('should pace several waiters from a delayed release of the only slot', async () => {
+		vi.useFakeTimers({ now: 0 })
+		const limiter = new LeakyBucketLimiter({
+			limitOptions: { intervalMs: 100 },
+			limitBehavior: 'enqueue',
+			queue: { capacity: 2, concurrency: 1 },
+		})
+		const hold = Promise.withResolvers<undefined>()
+		const first = limiter.run(async () => await hold.promise)
+		const secondCallback = vi.fn(() => Date.now())
+		const thirdCallback = vi.fn(() => Date.now())
+		const second = limiter.run(secondCallback)
+		const third = limiter.run(thirdCallback)
+
+		try {
+			await vi.advanceTimersByTimeAsync(500)
+			expect(secondCallback).not.toHaveBeenCalled()
+			hold.resolve(undefined)
+			await expect(second).resolves.toBe(500)
+			await vi.advanceTimersByTimeAsync(99)
+			expect(thirdCallback).not.toHaveBeenCalled()
+			await vi.advanceTimersByTimeAsync(1)
+			await expect(third).resolves.toBe(600)
+		}
+		finally {
+			const settled = Promise.allSettled([first, second, third])
+			hold.resolve(undefined)
+			await limiter.destroy()
+			await settled
+		}
+	})
+
+	it('should preserve the last start through cancellation and expiry and reset history on clear', async () => {
+		vi.useFakeTimers({ now: 0, toFake: ['Date', 'performance', 'setTimeout', 'clearTimeout'] })
+		const limiter = new LeakyBucketLimiter({
+			limitOptions: { intervalMs: 100 },
+			limitBehavior: 'enqueue',
+			queue: { capacity: 2 },
+		})
+		const controller = new AbortController()
+		const callback = vi.fn()
+
+		try {
+			await limiter.run(() => {}, { key: 'A' })
+			const cancelled = limiter.run(callback, { key: 'A', signal: controller.signal })
+			controller.abort()
+			await expect(cancelled).rejects.toMatchObject({ code: RateLimitErrorCode.Cancelled })
+
+			const expiring = limiter.run(callback, { key: 'A', maxWaitMs: 50 })
+			const expired = expect(expiring).rejects.toMatchObject({ code: RateLimitErrorCode.Expired })
+			await vi.advanceTimersByTimeAsync(50)
+			await expired
+			await expect(limiter.run(() => Date.now(), { key: 'B' })).resolves.toBe(50)
+			expect(await limiter.getStatus('A')).toMatchObject({ lastStartedAt: 0, nextAvailableAt: 100 })
+
+			const waiting = limiter.run(callback, { key: 'A' })
+			const cleared = expect(waiting).rejects.toMatchObject({ code: RateLimitErrorCode.Cleared })
+			await limiter.clear('A')
+			await cleared
+			expect(await limiter.getStatus('A')).toMatchObject({ lastStartedAt: null, nextAvailableAt: 50 })
+			expect(await limiter.getStatus('B')).toMatchObject({ lastStartedAt: 50, nextAvailableAt: 150 })
+			expect(callback).not.toHaveBeenCalled()
+		}
+		finally {
+			await limiter.destroy()
+		}
+	})
+
+	describe('execution contract', () => {
+		function createLimiter(options: RateLimiterOptions) {
+			return new LeakyBucketLimiter({
+				...options,
+				limitOptions: { intervalMs: 100 },
+			})
+		}
+
+		beforeEach(() => {
+			vi.useFakeTimers({
+				now: 0,
+				toFake: [
+					'Date',
+					'performance',
+					'setTimeout',
+					'clearTimeout',
+				],
+			})
+		})
+
+		describe('admission and waiting', () => {
+			it('should honor a per-task admission mode without changing the instance default', async () => {
+				const limiter = createLimiter({
+					queue: { capacity: 1 },
+				})
+				const rejected = vi.fn()
+				const queued = vi.fn(Date.now)
+
+				await limiter.run(Date.now)
+
+				await expect(limiter.run(rejected)).rejects.toMatchObject({
+					code: RateLimitErrorCode.LimitExceeded,
+					retryAfterMs: 100,
+				})
+
+				const pending = limiter.run(queued, { limitBehavior: 'enqueue' })
+				const settled = Promise.allSettled([pending])
+
+				try {
+					await expect(limiter.run(rejected)).rejects.toMatchObject({
+						code: RateLimitErrorCode.LimitExceeded,
+						retryAfterMs: 100,
+					})
+
+					await vi.advanceTimersByTimeAsync(99)
+					expect(queued).not.toHaveBeenCalled()
+					await vi.advanceTimersByTimeAsync(1)
+					await expect(pending).resolves.toBe(100)
+					expect(queued).toHaveBeenCalledOnce()
+					expect(rejected).not.toHaveBeenCalled()
+				}
+				finally {
+					await limiter.destroy()
+					await settled
+				}
+			})
+
+			it('should reject a pre-aborted submission and leave its key ready for the next run', async () => {
+				const limiter = createLimiter({})
+				const callback = vi.fn(Date.now)
+
+				await expect(limiter.run(callback, {
+					signal: AbortSignal.abort(),
+				})).rejects.toMatchObject({
+					code: RateLimitErrorCode.Cancelled,
+				})
+
+				expect(callback).not.toHaveBeenCalled()
+				await expect(limiter.run(callback)).resolves.toBe(0)
+				expect(callback).toHaveBeenCalledOnce()
+			})
+
+			it('should apply the default deadline and let a per-task override wait for quota', async () => {
+				const limiter = createLimiter({
+					limitBehavior: 'enqueue',
+					queue: { capacity: 2, maxWaitMs: 50 },
+				})
+				await limiter.run(Date.now)
+				const shortCallback = vi.fn(Date.now)
+				const longCallback = vi.fn(Date.now)
+				const short = limiter.run(shortCallback)
+				const long = limiter.run(longCallback, { maxWaitMs: 125 })
+				const settled = Promise.allSettled([short, long])
+
+				try {
+					const shortRejected = vi.fn()
+					void short.catch(shortRejected)
+
+					await expect(limiter.run(shortCallback, { maxWaitMs: 200 })).rejects.toMatchObject({
+						code: RateLimitErrorCode.QueueOverflow,
+					})
+
+					await vi.advanceTimersByTimeAsync(49)
+					expect(shortRejected).not.toHaveBeenCalled()
+
+					await vi.advanceTimersByTimeAsync(1)
+					await expect(short).rejects.toMatchObject({ code: RateLimitErrorCode.Expired })
+					expect(shortCallback).not.toHaveBeenCalled()
+					expect(longCallback).not.toHaveBeenCalled()
+
+					await vi.advanceTimersByTimeAsync(50)
+					await expect(long).resolves.toBe(100)
+					expect(longCallback).toHaveBeenCalledOnce()
+				}
+				finally {
+					await limiter.destroy()
+					await settled
+				}
+			})
+		})
+
+		describe('lifecycle', () => {
+			it('should clear one key with its waiter and preserve the other key until instance clear', async () => {
+				const limiter = createLimiter({
+					limitBehavior: 'enqueue',
+					queue: { capacity: 2 },
+				})
+				const otherInstance = createLimiter({})
+				await limiter.run(Date.now, { key: 'A' })
+				await expect(otherInstance.run(Date.now, { key: 'A' })).resolves.toBe(0)
+				await limiter.run(Date.now, { key: 'B' })
+				const callbackA = vi.fn(Date.now)
+				const callbackB = vi.fn(Date.now)
+				const waitingA = limiter.run(callbackA, { key: 'A' })
+				const waitingB = limiter.run(callbackB, { key: 'B' })
+				const settled = Promise.allSettled([waitingA, waitingB])
+				const waitingBRejected = vi.fn()
+				void waitingB.catch(waitingBRejected)
+
+				try {
+					await limiter.clear('A')
+					await expect(waitingA).rejects.toMatchObject({ code: RateLimitErrorCode.Cleared })
+					await expect(limiter.run(Date.now, { key: 'A', limitBehavior: 'reject' })).resolves.toBe(0)
+
+					await expect(limiter.run(Date.now, { key: 'B', limitBehavior: 'reject' })).rejects.toMatchObject({
+						code: RateLimitErrorCode.LimitExceeded,
+						retryAfterMs: 100,
+					})
+
+					expect(waitingBRejected).not.toHaveBeenCalled()
+
+					await limiter.clear()
+					await expect(waitingB).rejects.toMatchObject({ code: RateLimitErrorCode.Cleared })
+					await expect(limiter.run(Date.now, { key: 'A', limitBehavior: 'reject' })).resolves.toBe(0)
+					await expect(limiter.run(Date.now, { key: 'B', limitBehavior: 'reject' })).resolves.toBe(0)
+
+					await expect(otherInstance.run(callbackA, { key: 'A' })).rejects.toMatchObject({
+						code: RateLimitErrorCode.LimitExceeded,
+					})
+
+					await vi.advanceTimersByTimeAsync(100)
+					expect(callbackA).not.toHaveBeenCalled()
+					expect(callbackB).not.toHaveBeenCalled()
+					expect(vi.getTimerCount()).toBe(0)
+				}
+				finally {
+					await limiter.destroy()
+					await otherInstance.destroy()
+					await settled
+				}
+			})
+
+			it('should reject waiting and new work on destroy and await the running callback', async () => {
+				const limiter = createLimiter({
+					limitBehavior: 'enqueue',
+					queue: { capacity: 1, concurrency: 1 },
+				})
+				const hold = Promise.withResolvers<number>()
+				const running = limiter.run(async () => await hold.promise, { key: 'A' })
+				const callback = vi.fn(Date.now)
+				const waiting = limiter.run(callback, { key: 'B', maxWaitMs: 50 })
+				const rejected = expect(waiting).rejects.toMatchObject({ code: RateLimitErrorCode.Destroyed })
+				const finished = vi.fn()
+				const shutdown = limiter.destroy().then(finished)
+
+				try {
+					await rejected
+					await expect(limiter.run(callback, { key: 'C' })).rejects.toMatchObject({ code: RateLimitErrorCode.Destroyed })
+					expect(finished).not.toHaveBeenCalled()
+					expect(callback).not.toHaveBeenCalled()
+					expect(vi.getTimerCount()).toBe(0)
+				}
+				finally {
+					hold.resolve(42)
+					await shutdown
+				}
+
+				await expect(running).resolves.toBe(42)
+				expect(finished).toHaveBeenCalledOnce()
+			})
+		})
+	})
+})

@@ -1,13 +1,7 @@
-import { CustomError } from './custom.error.js';
-import { RateLimitErrorCode } from '../enums/rate-limit-error-code.js';
-
-export interface RateLimitErrorPlainObject extends Error {
-	code: RateLimitErrorCode;
-	retryAt: number | null;
-}
+import { RateLimitErrorCode } from './rate-limit-error-code.js'
 
 /**
- * An error thrown when a rate limit is exceeded.
+ * A rejection from the limiter before a callback starts.
  *
  * This error has a {@link code} property that indicates the type of error.
  *
@@ -15,78 +9,78 @@ export interface RateLimitErrorPlainObject extends Error {
  * - `LIMIT_EXCEEDED` - When the rate limit is exceeded.
  * - `QUEUE_OVERFLOW` - When the queue is full (if the limiter has a queue and the capacity has been exceeded).
  * - `EXPIRED` - When the task has expired (waited too long in the queue). This is related to the `maxWaitMs` option.
- *			   **NOTE:** This is never thrown if the task is executing too long. Such scenarios should be handled by the
- *			   task itself.
- * - `DESTROYED` - When the task is destroyed due to the rate limiter's `clear()` or `destroy()` methods.
- * - `CANCELLED` - When the task is cancelled using an abort signal.
+ * 			   **NOTE:** This is never thrown if the task is executing too long. Such scenarios should be handled by the
+ * 			   task itself.
+ * - `CLEARED` - When the task was waiting when its key was cleared.
+ * - `DESTROYED` - When the limiter is shutting down or has shut down.
+ * - `CANCELLED` - When the signal aborted before the callback started.
  */
-export class RateLimitError extends CustomError {
-	private readonly _code: RateLimitErrorCode;
-	private readonly _retryAt: number | null;
+export class RateLimitError extends Error {
+	/**
+	 * The reason the limiter rejected the task.
+	 */
+	public readonly code: RateLimitErrorCode
 
-	/** @internal */
-	constructor(code: RateLimitErrorCode, retryAt?: number, message?: string) {
-		if (!message) {
-			switch (code) {
-				case RateLimitErrorCode.LimitExceeded: {
-					message = `Rate limit exceeded.${retryAt ? ` Retry at ${new Date(retryAt).toISOString()}.` : ''}`;
-					break;
-				}
+	/**
+	 * Delay until a retry may become eligible, if known.
+	 */
+	public readonly retryAfterMs: number | null
 
-				case RateLimitErrorCode.QueueOverflow: {
-					message = 'Queue overflow.';
-					break;
-				}
+	/**
+	 * The task's diagnostic identifier, if supplied or generated.
+	 */
+	public readonly id: string | undefined
 
-				case RateLimitErrorCode.Expired: {
-					message = 'Task expired.';
-					break;
-				}
+	/**
+	 * Creates a rejection with an optional retry delay in milliseconds and diagnostic identifier.
+	 */
+	constructor(code: RateLimitErrorCode, retryAfterMs: number | null = null, id?: string) {
+		let message: string
 
-				case RateLimitErrorCode.Destroyed: {
-					message = 'Task destroyed.';
-					break;
-				}
+		switch (code) {
+			case RateLimitErrorCode.LimitExceeded:
+				message = `Rate limit exceeded.${retryAfterMs
+					? ` Retry after ${retryAfterMs}ms.`
+					: ''}`
 
-				case RateLimitErrorCode.Cancelled: {
-					message = 'Task cancelled.';
-					break;
-				}
+				break
 
-				// No default
-			}
+			case RateLimitErrorCode.QueueOverflow:
+				message = 'Queue overflow.'
+
+				break
+
+			case RateLimitErrorCode.Expired:
+				message = 'Task expired.'
+
+				break
+
+			case RateLimitErrorCode.Destroyed:
+				message = 'Task destroyed.'
+
+				break
+
+			case RateLimitErrorCode.Cancelled:
+				message = 'Task cancelled.'
+
+				break
+
+			case RateLimitErrorCode.Cleared:
+				message = 'The limiter was cleared before the task was executed.'
+
+				break
+
+			default:
+				message = 'Unknown error.'
 		}
 
-		super(message);
+		super(message)
 
-		this._code = code;
-		this._retryAt = retryAt ?? null;
-	}
+		this.name = 'RateLimitError'
+		this.code = code
+		this.retryAfterMs = retryAfterMs
+		this.id = id
 
-	/**
-	 * The error code.
-	 */
-	public get code(): RateLimitErrorCode {
-		return this._code;
-	}
-
-	/**
-	 * The timestamp (in milliseconds) when the task can be retried.
-	 *
-	 * Can be `null` if the retry time is not known.
-	 */
-	public get retryAt(): number | null {
-		return this._retryAt ?? null;
-	}
-
-	// eslint-disable-next-line @typescript-eslint/naming-convention
-	public toJSON(): RateLimitErrorPlainObject {
-		return {
-			name: this.name,
-			message: this.message,
-			code: this._code,
-			retryAt: this._retryAt,
-			stack: this.stack,
-		};
+		Object.setPrototypeOf(this, new.target.prototype)
 	}
 }

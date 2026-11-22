@@ -1,65 +1,59 @@
-import { type SlidingWindowLogOptions } from './sliding-window-log.options.js';
-import { SlidingWindowLogPolicy } from './sliding-window-log.policy.js';
-import { type SlidingWindowLogState } from './sliding-window-log.state.js';
-import { type SlidingWindowLogStatus } from './sliding-window-log.status.js';
-import { RateLimitErrorCode } from '../../enums/rate-limit-error-code.js';
-import { RateLimitError } from '../../errors/rate-limit.error.js';
-import { type RateLimiterRunOptions } from '../../interfaces/rate-limiter-run-options.js';
-import { AbstractRateLimiter, type ExecutionContext } from '../abstract-rate-limiter.js';
+import type { RateLimiterRunOptions } from '../../contracts/rate-limiter-run-options.js'
+import type { RateLimiter } from '../../contracts/rate-limiter.js'
+import type { SlidingWindowLogOptions } from './sliding-window-log.options.js'
+import type { SlidingWindowLogState } from './sliding-window-log.state.js'
+import type { SlidingWindowLogStatus } from './sliding-window-log.status.js'
+import { RateLimiterCoordinator } from '../../runtime/rate-limiter-coordinator.js'
+import { SlidingWindowLogPolicy } from './sliding-window-log.policy.js'
 
 /**
- * The options for running a task in the Sliding Window Log rate limiter.
+ * Limits callback starts using a separate sliding history of actual starts for each key.
  */
-export type SlidingWindowLogLimiterRunOptions = Omit<RateLimiterRunOptions, 'limitBehavior' | 'priority'>;
+export class SlidingWindowLogLimiter implements RateLimiter<SlidingWindowLogStatus> {
+	private readonly _coordinator: RateLimiterCoordinator<SlidingWindowLogState, SlidingWindowLogStatus>
 
-/**
- * Sliding Window Log rate limiter.
- *
- * Designed primarily for client-side use to respect third-party limits or protect resources.
- * While this can be used as a server-side limiter with custom distributed storage
- * (e.g., Redis), it is best-effort and not recommended due to high network round-trip latency.
- *
- * Note: Unlike queue-based limiters, this implementation operates in strict immediate mode.
- * It does not support request queueing, delays, priorities, or task cancellation.
- */
-export class SlidingWindowLogLimiter extends AbstractRateLimiter<SlidingWindowLogState, SlidingWindowLogStatus> {
-	protected override readonly _policy: SlidingWindowLogPolicy;
-
+	/**
+	 * Creates a limiter with one or more sliding window profiles and optional bounded waiting.
+	 */
 	constructor(options: SlidingWindowLogOptions) {
-		super(options);
+		const { limitOptions, ...runtimeOptions } = options
 
-		this._policy = new SlidingWindowLogPolicy(options.limit, options.windowMs);
+		const policy = new SlidingWindowLogPolicy('limit' in limitOptions
+			? [limitOptions]
+			: limitOptions)
+
+		this._coordinator = new RateLimiterCoordinator(policy, runtimeOptions, 'SlidingWindowLogLimiter')
 	}
 
-	protected override async _runInternal<T>(fn: () => T | Promise<T>, ctx: ExecutionContext): Promise<T> {
-		const now = this._clock.now();
-		const storeTtlMs = this._policy.windowMs;
-
-		await this._store.acquireLock?.(ctx.key);
-
-		try {
-			const state = (await this._store.get(ctx.key)) ?? this._policy.getInitialState();
-
-			const { decision, nextState } = this._policy.evaluate(state, now, ctx.cost);
-
-			if (decision.kind === 'deny') {
-				this._logger.debug(`[DENY] [id: ${ctx.id}, key: ${ctx.key}] - Retry: +${decision.retryAt - now}ms`);
-				throw new RateLimitError(RateLimitErrorCode.LimitExceeded, decision.retryAt);
-			}
-
-			await this._store.set(ctx.key, nextState, storeTtlMs);
-
-			this._logger.debug(
-				`[ALLOW] [id: ${ctx.id}, key: ${ctx.key}] - used/lim: ${nextState.totalUsed}/${this._policy.limit} logs: ${nextState.logs.size}`,
-			);
-		} finally {
-			await this._store.releaseLock?.(ctx.key);
-		}
-
-		return await this._execute<T>(fn, now, storeTtlMs, ctx);
+	/**
+	 * Executes one callback when selected. A winning immediate callback starts synchronously.
+	 */
+	// eslint-disable-next-line ts/promise-function-async -- Return the promise that assimilates the original outcome.
+	public run<T>(callback: () => T | PromiseLike<T>, options?: RateLimiterRunOptions): Promise<T> {
+		return this._coordinator.run(callback, options)
 	}
 
-	protected override _getDebugStateString(state: SlidingWindowLogState): string {
-		return `used/lim: ${state.totalUsed}/${this._policy.limit} logs: ${state.logs.size}`;
+	/**
+	 * Cancels pending work and clears history for the given key, or for the entire instance.
+	 *
+	 * Running callbacks finish and keep their slots until settlement.
+	 */
+	public async clear(key?: string): Promise<void> {
+		this._coordinator.clear(key)
+	}
+
+	/**
+	 * Reads quota status for the given key, or for the default key when omitted.
+	 */
+	public async getStatus(key?: string): Promise<SlidingWindowLogStatus> {
+		return this._coordinator.getStatus(key)
+	}
+
+	/**
+	 * Closes admission, cancels pending work, and waits for all running callbacks to settle.
+	 */
+	// eslint-disable-next-line ts/promise-function-async -- Preserve the shared shutdown promise.
+	public destroy(): Promise<void> {
+		return this._coordinator.destroy()
 	}
 }

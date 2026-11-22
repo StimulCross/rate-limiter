@@ -1,10 +1,12 @@
-/**
- * Fixed Window rate limiter state.
- *
- * When using a distributed state store, make sure it properly serializes and deserializes the state.
- */
+import type { FixedWindowBounds } from './fixed-window.status.js'
+
+/** @internal */
+export interface FixedWindowUsage extends FixedWindowBounds {
+	used: number
+}
+
+/** @internal */
 export interface FixedWindowState {
-	windowStart: number;
-	used: number;
-	reserved: number;
+	lastObservedTime: number
+	windows: readonly FixedWindowUsage[]
 }

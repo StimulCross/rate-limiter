@@ -1,159 +1,158 @@
-import { type FixedWindowState } from './fixed-window.state.js';
-import { type FixedWindowStatus } from './fixed-window.status.js';
-import { type RateLimitPolicy, type RateLimitPolicyResult } from '../../core/rate-limit-policy.js';
-import { validateCost } from '../../utils/validate-cost.js';
+import type { RateLimitPolicy } from '../../contracts/rate-limit-policy.js'
+import type { FixedWindowLimitOptions } from './fixed-window.options.js'
+import type { FixedWindowState, FixedWindowUsage } from './fixed-window.state.js'
+import type { FixedWindowBounds, FixedWindowStatus } from './fixed-window.status.js'
 
 /** @internal */
 export class FixedWindowPolicy implements RateLimitPolicy<FixedWindowState, FixedWindowStatus> {
-	constructor(
-		private readonly _limit: number,
-		private readonly _windowMs: number,
-		private readonly _maxReserved: number = Number.POSITIVE_INFINITY,
-	) {
-		if (!Number.isSafeInteger(_limit) || _limit <= 0) {
-			throw new Error(`Invalid limit: ${_limit}. Must be a positive integer.`);
-		}
+	private readonly _profiles: readonly FixedWindowLimitOptions[]
 
-		if (!Number.isSafeInteger(_windowMs) || _windowMs <= 0) {
-			throw new Error(`Invalid windowMs: ${_windowMs}. Must be a positive integer.`);
-		}
+	constructor(profiles: readonly FixedWindowLimitOptions[]) {
+		if (profiles.length === 0)
+			throw new RangeError('Fixed Window requires at least one profile')
 
-		if (_maxReserved < 0 || (_maxReserved !== Number.POSITIVE_INFINITY && !Number.isSafeInteger(_maxReserved))) {
-			throw new Error(`Invalid maxReserved: ${_maxReserved}. Must be a positive integer or Infinity.`);
-		}
-	}
+		this._profiles = profiles.map(profile => {
+			const { limit, windowMs } = profile
 
-	public get limit(): number {
-		return this._limit;
-	}
+			if (!Number.isSafeInteger(limit) || limit <= 0)
+				throw new RangeError('Fixed Window limit must be a positive safe integer')
 
-	public get windowMs(): number {
-		return this._windowMs;
-	}
+			if (!Number.isFinite(windowMs) || windowMs <= 0)
+				throw new RangeError('Fixed Window duration must be positive and finite')
 
-	public getInitialState(): FixedWindowState {
-		return { windowStart: 0, used: 0, reserved: 0 };
-	}
+			if (profile.alignment === 'grid') {
+				const offset = profile.offsetMs ?? 0
 
-	public getStatus(state: FixedWindowState, now: number): FixedWindowStatus {
-		const { windowStart, used, reserved } = this._syncState(state, now);
-		const windowEnd = windowStart + this._windowMs;
+				if (!Number.isFinite(offset))
+					throw new RangeError('Fixed Window grid offset must be finite')
 
-		let nextAvailableAt: number;
-
-		if (used < this._limit) {
-			nextAvailableAt = windowStart;
-		} else {
-			const blockedWindows = Math.floor((used + reserved) / this._limit);
-			nextAvailableAt = windowStart + blockedWindows * this._windowMs;
-		}
-
-		const windowsToClear = Math.ceil((used + reserved) / this._limit);
-		const resetAt = windowStart + Math.max(1, windowsToClear) * this._windowMs;
-
-		return {
-			windowStart,
-			windowEnd,
-			limit: this._limit,
-			used,
-			reserved,
-			remaining: Math.max(0, this._limit - used),
-			nextAvailableAt,
-			resetAt,
-		};
-	}
-
-	public evaluate(
-		state: FixedWindowState,
-		now: number,
-		cost: number,
-		shouldReserve?: boolean,
-	): RateLimitPolicyResult<FixedWindowState> {
-		validateCost(cost, this._limit);
-
-		const { windowStart, used, reserved } = this._syncState(state, now);
-		const currentTotal = used + cost;
-
-		if (reserved === 0 && currentTotal <= this._limit) {
-			return {
-				decision: { kind: 'allow' },
-				nextState: { windowStart, used: currentTotal, reserved: 0 },
-			};
-		}
-
-		if (shouldReserve) {
-			if (reserved + cost > this._maxReserved) {
-				const deficit = reserved + cost - this._maxReserved;
-				const windowsToWait = Math.ceil(deficit / this._limit);
-				const retryAt = windowStart + Math.max(1, windowsToWait) * this._windowMs;
-
-				return this._deny(windowStart, used, reserved, retryAt);
+				return { ...profile, offsetMs: offset % windowMs }
 			}
 
-			const totalItems = used + reserved + cost;
-			const windowIndex = Math.floor((totalItems - 1) / this._limit);
-			const runAt = windowStart + windowIndex * this._windowMs;
+			return { ...profile }
+		})
+	}
+
+	public check(state: FixedWindowState | undefined, now: number): number | undefined {
+		const time = this._getEffectiveTime(state, now)
+		let nextAvailableAt: number | undefined
+
+		for (const [index, profile] of this._profiles.entries()) {
+			const window = this._getActiveWindow(state, index, time)
+
+			if (window === undefined)
+				this._getWindowBounds(profile, time)
+			else if (window.used === profile.limit)
+				nextAvailableAt = Math.max(nextAvailableAt ?? window.end, window.end)
+		}
+
+		return nextAvailableAt
+	}
+
+	public charge(state: FixedWindowState | undefined, now: number): FixedWindowState {
+		const time = this._getEffectiveTime(state, now)
+		const current: FixedWindowState = state ?? { lastObservedTime: time, windows: [] }
+		let windows: FixedWindowUsage[] | undefined
+
+		for (const [index, profile] of this._profiles.entries()) {
+			if (this._getActiveWindow(current, index, time) === undefined) {
+				windows ??= current.windows.slice()
+
+				windows[index] = {
+					...this._getWindowBounds(profile, time),
+					used: 0,
+				}
+			}
+		}
+
+		if (windows !== undefined)
+			current.windows = windows
+
+		for (const window of current.windows)
+			window.used++
+
+		current.lastObservedTime = time
+
+		return current
+	}
+
+	public getStatus(state: FixedWindowState | undefined, now: number): FixedWindowStatus {
+		const time = this._getEffectiveTime(state, now)
+		let nextAvailableAt = time
+		const profiles = this._profiles.map((profile, index) => {
+			const active = this._getActiveWindow(state, index, time)
+			const used = active?.used ?? 0
+			let window: FixedWindowBounds | null = null
+
+			if (active !== undefined) {
+				window = { start: active.start, end: active.end }
+
+				if (used === profile.limit)
+					nextAvailableAt = Math.max(nextAvailableAt, active.end)
+			}
+			else {
+				const bounds = this._getWindowBounds(profile, time)
+
+				if (profile.alignment === 'grid')
+					window = bounds
+			}
 
 			return {
-				decision: { kind: 'delay', runAt },
-				nextState: {
-					windowStart,
-					used,
-					reserved: reserved + cost,
-				},
-			};
-		}
+				window,
+				limit: profile.limit,
+				used,
+				remaining: profile.limit - used,
+			}
+		})
 
-		const windowsToWait = Math.ceil((used + reserved + cost - this._limit) / this._limit);
-		const retryAt = windowStart + Math.max(1, windowsToWait) * this._windowMs;
-
-		return this._deny(windowStart, used, reserved, retryAt);
+		return { nextAvailableAt, profiles }
 	}
 
-	public revert(state: FixedWindowState, cost: number, now: number): FixedWindowState {
-		let { used, reserved, windowStart } = this._syncState(state, now);
+	private _getEffectiveTime(state: FixedWindowState | undefined, now: number): number {
+		if (!Number.isFinite(now))
+			throw new RangeError('Fixed Window timestamp must be finite')
 
-		if (reserved >= cost) {
-			reserved -= cost;
-		} else {
-			const remainder = cost - reserved;
-			reserved = 0;
-			used = Math.max(0, used - remainder);
-		}
-
-		return { windowStart, used, reserved };
+		return Math.max(now, state?.lastObservedTime ?? now)
 	}
 
-	private _deny(
-		start: number,
-		used: number,
-		reserved: number,
-		retryAt: number,
-	): RateLimitPolicyResult<FixedWindowState> {
-		return {
-			decision: { kind: 'deny', retryAt },
-			nextState: { windowStart: start, used, reserved },
-		};
+	private _getActiveWindow(
+		state: FixedWindowState | undefined,
+		index: number,
+		time: number,
+	): FixedWindowUsage | undefined {
+		const window = state?.windows[index]
+
+		return window !== undefined && time < window.end
+			? window
+			: undefined
 	}
 
-	private _syncState(state: FixedWindowState, now: number): FixedWindowState {
-		const currentWindowStart = Math.max(Math.floor(now / this._windowMs) * this._windowMs, state.windowStart);
+	private _getWindowBounds(profile: FixedWindowLimitOptions, time: number): FixedWindowBounds {
+		const { windowMs } = profile
+		let start = time
+		let end = time + windowMs
 
-		if (currentWindowStart <= state.windowStart) {
-			return state;
+		if (profile.alignment === 'grid') {
+			const offset = profile.offsetMs ?? 0
+			let idx = Math.floor((time - offset) / windowMs)
+			start = offset + idx * windowMs
+			end = offset + (idx + 1) * windowMs
+
+			if (time < start) {
+				idx--
+				end = start
+				start = offset + idx * windowMs
+			}
+			else if (time >= end) {
+				idx++
+				start = end
+				end = offset + (idx + 1) * windowMs
+			}
 		}
 
-		let { reserved } = state;
-		const windowsPassed = Math.floor((currentWindowStart - state.windowStart) / this._windowMs);
-		const burnableWindows = windowsPassed - 1;
+		if (!Number.isFinite(start) || !Number.isFinite(end) || !(start <= time && time < end))
+			throw new RangeError('Fixed Window boundaries cannot be represented at this timestamp')
 
-		if (burnableWindows > 0 && reserved > 0) {
-			reserved = Math.max(0, reserved - burnableWindows * this._limit);
-		}
-
-		const used = Math.min(reserved, this._limit);
-		reserved = Math.max(0, reserved - used);
-
-		return { windowStart: currentWindowStart, used, reserved };
+		return { start, end }
 	}
 }

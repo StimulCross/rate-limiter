@@ -1,166 +1,104 @@
-import { Deque } from '@stimulcross/ds-deque';
-import { type SlidingWindowLogEntry, type SlidingWindowLogState } from './sliding-window-log.state.js';
-import { type SlidingWindowLogStatus } from './sliding-window-log.status.js';
-import { type RateLimitPolicy, type RateLimitPolicyResult } from '../../core/rate-limit-policy.js';
-import { validateCost } from '../../utils/validate-cost.js';
+import type { RateLimitPolicy } from '../../contracts/rate-limit-policy.js'
+import type { SlidingWindowLogLimitOptions } from './sliding-window-log.options.js'
+import type { SlidingWindowLogState } from './sliding-window-log.state.js'
+import type { SlidingWindowLogStatus } from './sliding-window-log.status.js'
+import { Deque } from '@stimulcross/ds-deque'
+import { addTimestampDelay } from '../../utils/next-timestamp.js'
 
 /** @internal */
 export class SlidingWindowLogPolicy implements RateLimitPolicy<SlidingWindowLogState, SlidingWindowLogStatus> {
-	constructor(
-		private readonly _limit: number,
-		private readonly _windowMs: number,
-	) {
-		if (!Number.isFinite(_limit) || !Number.isInteger(_limit) || _limit <= 0) {
-			throw new Error(`Invalid limit: ${_limit}. Must be a positive integer.`);
+	private readonly _profiles: readonly SlidingWindowLogLimitOptions[]
+	private readonly _longestWindowMs: number
+
+	constructor(profiles: readonly SlidingWindowLogLimitOptions[]) {
+		if (profiles.length === 0)
+			throw new RangeError('Sliding Window Log requires at least one profile')
+
+		let longestWindowMs = 0
+
+		this._profiles = profiles.map(({ limit, windowMs }) => {
+			if (!Number.isSafeInteger(limit) || limit <= 0)
+				throw new RangeError('Sliding Window Log limit must be a positive safe integer')
+
+			if (!Number.isFinite(windowMs) || windowMs <= 0)
+				throw new RangeError('Sliding Window Log duration must be positive and finite')
+
+			longestWindowMs = Math.max(longestWindowMs, windowMs)
+
+			return { limit, windowMs }
+		})
+
+		this._longestWindowMs = longestWindowMs
+	}
+
+	public check(history: SlidingWindowLogState | undefined, time: number): number | undefined {
+		if (history === undefined)
+			return undefined
+
+		let nextAvailableAt: number | undefined
+
+		for (const { limit, windowMs } of this._profiles) {
+			if (history.size < limit)
+				continue
+
+			// eslint-disable-next-line ts/no-non-null-assertion
+			const start = history.at(history.size - limit)!
+			const expiry = addTimestampDelay(start, windowMs)
+
+			if (expiry > time)
+				nextAvailableAt = Math.max(nextAvailableAt ?? expiry, expiry)
 		}
 
-		if (!Number.isFinite(_windowMs) || !Number.isInteger(_windowMs) || _windowMs <= 0) {
-			throw new Error(`Invalid windowMs: ${_windowMs}. Must be a positive integer.`);
+		return nextAvailableAt
+	}
+
+	public charge(history: SlidingWindowLogState | undefined, time: number): SlidingWindowLogState {
+		const starts = history ?? new Deque<number>(1)
+		let oldest = starts.peekHead()
+
+		while (oldest !== undefined && addTimestampDelay(oldest, this._longestWindowMs) <= time) {
+			starts.shift()
+			oldest = starts.peekHead()
 		}
+
+		starts.push(time)
+
+		return starts
 	}
 
-	public get limit(): number {
-		return this._limit;
-	}
-
-	public get windowMs(): number {
-		return this._windowMs;
-	}
-
-	public getInitialState(): SlidingWindowLogState {
-		return {
-			logs: new Deque<SlidingWindowLogEntry>(),
-			totalUsed: 0,
-		};
-	}
-
-	public getStatus(state: SlidingWindowLogState, now: number): SlidingWindowLogStatus {
-		const syncedState = this._syncState(state, now);
-		const { logs, totalUsed } = syncedState;
-
-		const remaining = Math.max(0, this._limit - totalUsed);
-
-		const nextAvailableAt = this._calculateAvailableAt(logs, totalUsed, 1, now);
-
-		const tail = logs.peekTail();
-		const resetAt = tail ? tail.ts + this._windowMs : now;
-
-		return {
-			limit: this._limit,
-			windowMs: this._windowMs,
-			totalUsed,
-			remaining,
-			nextAvailableAt,
-			resetAt,
-		};
-	}
-
-	public evaluate(
-		state: SlidingWindowLogState,
-		now: number,
-		cost: number,
-	): RateLimitPolicyResult<SlidingWindowLogState> {
-		validateCost(cost, this._limit);
-
-		const syncedState = this._syncState(state, now);
-		const { logs, totalUsed } = syncedState;
-
-		if (totalUsed + cost <= this._limit) {
-			const tail = logs.peekTail();
-
-			if (tail?.ts === now) {
-				tail.count += cost;
-			} else {
-				logs.push({ ts: now, count: cost });
-			}
+	public getStatus(history: SlidingWindowLogState | undefined, time: number): SlidingWindowLogStatus {
+		const nextAvailableAt = this.check(history, time) ?? time
+		const profiles = this._profiles.map(({ limit, windowMs }) => {
+			const used = history === undefined
+				? 0
+				: this._countActiveStarts(history, time, windowMs)
 
 			return {
-				decision: { kind: 'allow' },
-				nextState: { logs, totalUsed: totalUsed + cost },
-			};
-		}
+				limit,
+				windowMs,
+				used,
+				remaining: limit - used,
+			}
+		})
 
-		const retryAt = this._calculateAvailableAt(logs, totalUsed, cost, now);
-
-		return {
-			decision: { kind: 'deny', retryAt },
-			nextState: syncedState,
-		};
+		return { nextAvailableAt, profiles }
 	}
 
-	public revert(state: SlidingWindowLogState, cost: number, now: number): SlidingWindowLogState {
-		if (cost <= 0 || state.totalUsed === 0) {
-			return state;
+	private _countActiveStarts(history: SlidingWindowLogState, time: number, windowMs: number): number {
+		let low = 0
+		let high = history.size
+
+		while (low < high) {
+			const middle = low + Math.floor((high - low) / 2)
+			// eslint-disable-next-line ts/no-non-null-assertion
+			const start = history.at(middle)!
+
+			if (addTimestampDelay(start, windowMs) <= time)
+				low = middle + 1
+			else
+				high = middle
 		}
 
-		const syncedState = this._syncState(state, now);
-		const { logs } = syncedState;
-		let { totalUsed } = syncedState;
-
-		let remainingToRemove = cost;
-
-		while (remainingToRemove > 0 && !logs.isEmpty) {
-			const tail = logs.peekTail()!;
-
-			if (tail.count <= remainingToRemove) {
-				remainingToRemove -= tail.count;
-				totalUsed -= tail.count;
-				logs.pop();
-			} else {
-				tail.count -= remainingToRemove;
-				totalUsed -= remainingToRemove;
-				remainingToRemove = 0;
-			}
-		}
-
-		return { logs, totalUsed: Math.max(0, totalUsed) };
-	}
-
-	private _syncState(state: SlidingWindowLogState, now: number): SlidingWindowLogState {
-		const { logs } = state;
-		let { totalUsed } = state;
-		const windowStart = now - this._windowMs;
-
-		while (!logs.isEmpty) {
-			const head = logs.peekHead();
-
-			if (head!.ts > windowStart) {
-				break;
-			}
-
-			const removed = logs.shift();
-
-			if (removed) {
-				totalUsed -= removed.count;
-			}
-		}
-
-		return { logs, totalUsed: Math.max(0, totalUsed) };
-	}
-
-	private _calculateAvailableAt(
-		logs: Deque<SlidingWindowLogEntry>,
-		totalUsed: number,
-		cost: number,
-		now: number,
-	): number {
-		if (totalUsed + cost <= this._limit) {
-			return now;
-		}
-
-		const targetToFree = totalUsed + cost - this._limit;
-		let freed = 0;
-		let availableAt = now;
-
-		for (const entry of logs) {
-			freed += entry.count;
-
-			if (freed >= targetToFree) {
-				availableAt = entry.ts + this._windowMs;
-				break;
-			}
-		}
-
-		return Math.max(now, availableAt);
+		return history.size - low
 	}
 }

@@ -1,36 +1,38 @@
-import { type RateLimiterStatus } from '../../core/rate-limiter-status.js';
+/**
+ * An observational snapshot of one Token Bucket profile.
+ */
+export interface TokenBucketProfileStatus {
+	/**
+	 * Maximum token balance.
+	 */
+	readonly capacity: number
+
+	/**
+	 * Tokens refilled per second.
+	 */
+	readonly refillRate: number
+
+	/**
+	 * Available tokens, including fractional refill up to capacity.
+	 */
+	readonly tokens: number
+}
 
 /**
- * The status of the Token Bucket rate limiter.
+ * An observational snapshot of one key's Token Bucket quotas.
  */
-export interface TokenBucketStatus extends RateLimiterStatus {
+export interface TokenBucketStatus {
 	/**
-	 * The maximum number of tokens that can be stored in the bucket.
+	 * Earliest quota-eligible start in Unix epoch milliseconds, assuming no intervening starts.
+	 *
+	 * A free execution slot and winning selection are also required for an actual start.
+	 *
+	 * Infinity indicates that the quota cannot recover within the clock's finite range.
 	 */
-	capacity: number;
+	readonly nextAvailableAt: number
 
 	/**
-	 * The rate, in seconds, at which tokens are refilled.
+	 * Per-profile quota snapshots in configuration order.
 	 */
-	refillRate: number;
-
-	/**
-	 * The number of tokens available in the bucket.
-	 */
-	tokens: number;
-
-	/**
-	 * The number of tokens that have been reserved.
-	 */
-	debt: number;
-
-	/**
-	 * The timestamp (in milliseconds) at which next token will be available for use.
-	 */
-	nextAvailableAt: number;
-
-	/**
-	 * The timestamp (in milliseconds) at which the bucket will be reset.
-	 */
-	resetAt: number;
+	readonly profiles: readonly TokenBucketProfileStatus[]
 }

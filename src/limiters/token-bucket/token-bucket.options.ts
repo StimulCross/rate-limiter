@@ -1,17 +1,40 @@
-import { type TokenBucketState } from './token-bucket.state.js';
-import { type RateLimiterOptions } from '../../interfaces/rate-limiter-options.js';
+import type { PriorityWeights } from '../../contracts/priority-weights.js'
+import type { RateLimiterOptions } from '../../contracts/rate-limiter-options.js'
 
 /**
- * Options for the Token Bucket rate limiter.
+ * One per-key Token Bucket profile.
  */
-export interface TokenBucketOptions extends RateLimiterOptions<TokenBucketState> {
+export interface TokenBucketLimitOptions {
 	/**
-	 * The maximum number of tokens that can be stored in the bucket.
+	 * Maximum token balance.
+	 *
+	 * Must be a positive safe integer.
 	 */
-	capacity: number;
+	readonly capacity: number
 
 	/**
-	 * The rate, in seconds, at which tokens are refilled.
+	 * Tokens refilled per second.
+	 *
+	 * Must be positive and finite.
 	 */
-	refillRate: number;
+	readonly refillRate: number
+}
+
+/**
+ * Configuration for a local Token Bucket limiter.
+ */
+export interface TokenBucketOptions extends RateLimiterOptions {
+	/**
+	 * A profile or a nonempty list of profiles.
+	 *
+	 * Each start spends one token from every profile for its key.
+	 */
+	limitOptions: TokenBucketLimitOptions | readonly TokenBucketLimitOptions[]
+
+	/**
+	 * Weights for global scheduling across keys.
+	 *
+	 * Defaults to `1`, `2`, `4`, `8`, and `16` from lowest to highest priority.
+	 */
+	weights?: PriorityWeights
 }

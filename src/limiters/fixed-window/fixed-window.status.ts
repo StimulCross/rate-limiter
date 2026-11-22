@@ -1,46 +1,56 @@
-import { type RateLimiterStatus } from '../../core/rate-limiter-status.js';
+/**
+ * Bounds of a half-open Fixed Window in Unix epoch milliseconds.
+ */
+export interface FixedWindowBounds {
+	/**
+	 * Inclusive start of the window.
+	 */
+	readonly start: number
+
+	/**
+	 * Exclusive end of the window.
+	 */
+	readonly end: number
+}
 
 /**
- * The status of the Fixed Window Limiter.
+ * An observational snapshot of one quota profile.
  */
-export interface FixedWindowStatus extends RateLimiterStatus {
+export interface FixedWindowProfileStatus {
 	/**
-	 * The start of the current window.
+	 * Current window boundaries. An unopened or elapsed first-start window is `null`.
 	 */
-	readonly windowStart: number;
+	readonly window: FixedWindowBounds | null
 
 	/**
-	 * The end of the current window.
+	 * Configured maximum starts per window.
 	 */
-	readonly windowEnd: number;
+	readonly limit: number
 
 	/**
-	 * The maximum number of tokens can be used in the window.
+	 * Callback starts charged to the current window.
 	 */
-	readonly limit: number;
+	readonly used: number
 
 	/**
-	 * The number of tokens that have been used in the current window.
+	 * Starts still available in the current or next unopened window.
 	 */
-	readonly used: number;
+	readonly remaining: number
+}
+
+/**
+ * An observational snapshot of one key's Fixed Window quotas.
+ */
+export interface FixedWindowStatus {
+	/**
+	 * Earliest quota-eligible start in Unix epoch milliseconds, assuming no intervening starts.
+	 *
+	 * A free execution slot and winning selection are also required for an actual start.
+	 */
+	readonly nextAvailableAt: number
 
 	/**
-	 * The number of tokens that are reserved for future windows.
+	 * Per-profile quota snapshots in configuration order.
 	 */
-	readonly reserved: number;
-
-	/**
-	 * The number of tokens that can be used in the current window.
-	 */
-	readonly remaining: number;
-
-	/**
-	 * The timestamp (in milliseconds) when the next token will be available for use.
-	 */
-	readonly nextAvailableAt: number;
-
-	/**
-	 * The timestamp (in milliseconds) when the limit will be reset (all tokens will be available for use again).
-	 */
-	readonly resetAt: number;
+	readonly profiles: readonly FixedWindowProfileStatus[]
 }
