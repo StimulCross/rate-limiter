@@ -1,9 +1,34 @@
-import { LogLevel } from '@stimulcross/logger'
+import { LoggerRuntime, LogLevel } from '@stimulcross/logger'
 import { describe, expect, it, vi } from 'vitest'
 import { RateLimitError, RateLimitErrorCode } from '../../src/index.js'
 import { FixedWindowLimiter } from '../../src/limiters/fixed-window/index.js'
 
 describe('limiter diagnostics', () => {
+	it.each([
+		{ context: 'OrdersLimiter', expectedContext: 'OrdersLimiter' },
+		{ context: undefined, expectedContext: 'FixedWindowLimiter' },
+		{ context: '', expectedContext: 'FixedWindowLimiter' },
+	])('should log with context $expectedContext when configured with "$context"', async ({ context, expectedContext }) => {
+		const limiter = new FixedWindowLimiter({
+			limitOptions: { limit: 1, windowMs: 1000 },
+			loggerOptions: { context, minLevel: 'info', colors: false, pid: false, timestamps: false },
+		})
+		const observe = vi.fn()
+		const unsubscribe = LoggerRuntime.subscribe(observe)
+
+		try {
+			await limiter.destroy()
+
+			expect(observe).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+				context: expectedContext,
+				args: ['[LIMITER DESTROYED]'],
+			}))
+		}
+		finally {
+			unsubscribe()
+		}
+	})
+
 	it('should record committed task events in order and escape opted-in identifiers', async () => {
 		const output = vi.fn()
 		const limiter = new FixedWindowLimiter({

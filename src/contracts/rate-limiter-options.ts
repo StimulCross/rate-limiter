@@ -8,7 +8,7 @@ import type { RateLimiterQueueOptions } from './rate-limiter-queue-options.js'
  *
  * The default threshold is `warning`.
  */
-export interface RateLimiterLoggerOptions extends Partial<Omit<LoggerOptions, 'context'>> {
+export interface RateLimiterLoggerOptions extends Partial<LoggerOptions> {
 	/**
 	 * Includes quoted task IDs and quota keys in messages. Enable only for identifiers safe to disclose.
 	 *

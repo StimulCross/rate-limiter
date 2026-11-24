@@ -138,7 +138,7 @@ export class RateLimiterCoordinator<TState, TStatus, TResult = unknown> {
 		this._quotaClock = clocks.quotaClock ?? EPOCH_CLOCK
 		this._waitingClock = clocks.waitingClock ?? MONOTONIC_CLOCK
 		this._scheduler = new Scheduler(capacity ?? 0, options.weights)
-		this._log = createLimiterLogger(context, options.loggerOptions)
+		this._log = createLimiterLogger(options.loggerOptions?.context || context, options.loggerOptions)
 	}
 
 	// eslint-disable-next-line ts/promise-function-async -- Return the same promise used to assimilate the callback result.
