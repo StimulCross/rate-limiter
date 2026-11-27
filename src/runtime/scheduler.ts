@@ -1,4 +1,5 @@
 import type { BinaryHeapHandle } from '@stimulcross/ds-binary-heap'
+import type { PriorityMode } from '../contracts/priority-mode.js'
 import type { PriorityWeights } from '../contracts/priority-weights.js'
 import type { Priority } from '../contracts/priority.js'
 import { IndexedBinaryHeap } from '@stimulcross/ds-binary-heap'
@@ -39,19 +40,21 @@ function compareRanks<Payload>(left: Task<Payload>, right: Task<Payload>): numbe
 export class Scheduler<Payload> {
 	private readonly _keys = new Map<string, WaitingKey<Payload>>()
 	private readonly _ready: IndexedBinaryHeap<Task<Payload>>[] = []
-	private readonly _selector: PrioritySelector
+	private readonly _selector?: PrioritySelector
 	private readonly _capacityWithArrival: number
 	private readonly _rankLimit: bigint
 	private _nextRank = 0n
 	private _size = 0
 
-	constructor(capacity: number, weights?: PriorityWeights) {
+	constructor(capacity: number, priorityMode: PriorityMode, weights?: PriorityWeights) {
 		if (!Number.isSafeInteger(capacity) || capacity < 0)
 			throw new RangeError('Waiting capacity must be a nonnegative safe integer')
 
 		this._capacityWithArrival = capacity + 1
 		this._rankLimit = 2n * BigInt(this._capacityWithArrival)
-		this._selector = new PrioritySelector(weights)
+
+		if (priorityMode === 'weighted')
+			this._selector = new PrioritySelector(weights)
 
 		for (const priority of PRIORITIES)
 			this._ready[priority - 1] = new IndexedBinaryHeap<Task<Payload>>(compareRanks)
@@ -143,23 +146,25 @@ export class Scheduler<Payload> {
 	}
 
 	public select(): Task<Payload> | undefined {
-		return this._select(this._getOfferedMask())
+		return this._select(this._selector ? this._getOfferedMask() : 0)
 	}
 
 	/**
 	 * Commits a start only if the task still wins the current decision.
 	 */
 	public start(task: Task<Payload>): boolean {
-		const mask = this._getOfferedMask()
+		const mask = this._selector ? this._getOfferedMask() : 0
 		const group = task.group
 
 		if (group === undefined || this._select(mask) !== task)
 			return false
 
-		this._selector.recordStart(mask, task.priority)
+		if (this._selector) {
+			this._selector.recordStart(mask, task.priority)
 
-		if (group.owner.oldest !== task)
-			group.owner.bypasses++
+			if (group.owner.oldest !== task)
+				group.owner.bypasses++
+		}
 
 		this._unlink(task, group)
 
@@ -201,21 +206,8 @@ export class Scheduler<Payload> {
 	}
 
 	private _refresh(owner: WaitingKey<Payload>): void {
-		let oldest: Task<Payload> | undefined
-
-		for (const group of owner.groups) {
-			const head = group?.head
-
-			if (head !== undefined && (oldest === undefined || head.rank < oldest.rank))
-				oldest = head
-		}
-
-		if (owner.oldest !== oldest) {
-			owner.oldest = oldest
-			owner.bypasses = 0n
-		}
-
-		const isProtected = oldest !== undefined && owner.bypasses >= this._selector.getBypassLimit(oldest.priority)
+		const protectedTask = this._selector ? this._refreshProtection(owner, this._selector) : undefined
+		let hasWaiters = false
 
 		for (const priority of PRIORITIES) {
 			const index = priority - 1
@@ -225,7 +217,7 @@ export class Scheduler<Payload> {
 				continue
 
 			const head = group.head
-			const offered = owner.isReady && (!isProtected || head === oldest)
+			const offered = owner.isReady && (!protectedTask || head === protectedTask)
 				? head
 				: undefined
 
@@ -244,10 +236,30 @@ export class Scheduler<Payload> {
 
 			if (head === undefined)
 				owner.groups[index] = undefined
+			else
+				hasWaiters = true
 		}
 
-		if (oldest === undefined)
+		if (!hasWaiters)
 			this._keys.delete(owner.key)
+	}
+
+	private _refreshProtection(owner: WaitingKey<Payload>, selector: PrioritySelector): Task<Payload> | undefined {
+		let oldest: Task<Payload> | undefined
+
+		for (const group of owner.groups) {
+			const head = group?.head
+
+			if (head && (!oldest || head.rank < oldest.rank))
+				oldest = head
+		}
+
+		if (owner.oldest !== oldest) {
+			owner.oldest = oldest
+			owner.bypasses = 0n
+		}
+
+		return oldest && owner.bypasses >= selector.getBypassLimit(oldest.priority) ? oldest : undefined
 	}
 
 	private _getOfferedMask(): number {
@@ -262,11 +274,20 @@ export class Scheduler<Payload> {
 	}
 
 	private _select(mask: number): Task<Payload> | undefined {
+		if (!this._selector) {
+			for (const priority of PRIORITIES) {
+				const task = this._ready[priority - 1].peek()
+
+				if (task)
+					return task
+			}
+
+			return undefined
+		}
+
 		const priority = this._selector.select(mask)
 
-		return priority === undefined
-			? undefined
-			: this._ready[priority - 1].peek()
+		return priority ? this._ready[priority - 1].peek() : undefined
 	}
 
 	private _relabel(): void {

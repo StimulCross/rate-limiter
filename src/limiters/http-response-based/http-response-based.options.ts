@@ -1,4 +1,3 @@
-import type { PriorityWeights } from '../../contracts/priority-weights.js'
 import type { RateLimiterOptions } from '../../contracts/rate-limiter-options.js'
 import type { HttpFeedbackExtractor } from './http-feedback.js'
 
@@ -24,11 +23,4 @@ export interface HttpResponseBasedOptions<TResponse = unknown> extends RateLimit
 	 * @default 60000
 	 */
 	fallbackResetDelayMs?: number
-
-	/**
-	 * Weights for global scheduling across keys.
-	 *
-	 * Defaults to `1`, `2`, `4`, `8`, and `16` from lowest to highest priority.
-	 */
-	weights?: PriorityWeights
 }

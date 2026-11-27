@@ -3,7 +3,6 @@ import type { Clock } from '../contracts/clock.js'
 import type { CoordinatorPolicy, QuotaBlock, SettleTask } from '../contracts/coordinator-policy.js'
 import type { IdGenerator } from '../contracts/id-generator.js'
 import type { LimitBehavior } from '../contracts/limit-behavior.js'
-import type { PriorityWeights } from '../contracts/priority-weights.js'
 import type { RateLimiterOptions } from '../contracts/rate-limiter-options.js'
 import type { RateLimiterRunOptions } from '../contracts/rate-limiter-run-options.js'
 import type { TaskOutcome } from '../contracts/task-outcome.js'
@@ -17,10 +16,6 @@ import { createLimiterLogger } from '../utils/limiter-logging.js'
 import { ScheduledAlarm } from '../utils/scheduled-alarm.js'
 import { PRIORITIES } from './priority-selector.js'
 import { Scheduler } from './scheduler.js'
-
-type RateLimiterCoordinatorOptions = RateLimiterOptions & {
-	readonly weights?: PriorityWeights
-}
 
 interface CoordinatorClocks {
 	readonly quotaClock?: Clock
@@ -115,11 +110,11 @@ export class RateLimiterCoordinator<TState, TStatus, TResult = unknown> {
 
 	constructor(
 		private readonly _policy: CoordinatorPolicy<TState, TStatus, TResult>,
-		options: RateLimiterCoordinatorOptions = {},
+		options: RateLimiterOptions = {},
 		context = 'RateLimiterCoordinator',
 		clocks: CoordinatorClocks = {},
 	) {
-		const { queue, limitBehavior = 'reject' } = options
+		const { queue, limitBehavior = 'reject', priorityMode = 'weighted', weights } = options
 		const { capacity, concurrency = Infinity, maxWaitMs = Infinity } = queue ?? {}
 
 		if (concurrency !== Infinity && (!Number.isSafeInteger(concurrency) || concurrency <= 0))
@@ -130,6 +125,9 @@ export class RateLimiterCoordinator<TState, TStatus, TResult = unknown> {
 		if (limitBehavior === 'enqueue' && capacity === undefined)
 			throw new RangeError('Enqueue requires an explicit waiting capacity')
 
+		if (priorityMode === 'strict' && weights)
+			throw new RangeError('Priority weights require weighted priority mode')
+
 		this._capacity = capacity
 		this._concurrency = concurrency
 		this._maxWaitMs = maxWaitMs
@@ -137,7 +135,7 @@ export class RateLimiterCoordinator<TState, TStatus, TResult = unknown> {
 		this._idGenerator = options.idGenerator
 		this._quotaClock = clocks.quotaClock ?? EPOCH_CLOCK
 		this._waitingClock = clocks.waitingClock ?? MONOTONIC_CLOCK
-		this._scheduler = new Scheduler(capacity ?? 0, options.weights)
+		this._scheduler = new Scheduler(capacity ?? 0, priorityMode, weights)
 		this._log = createLimiterLogger(options.loggerOptions?.context || context, options.loggerOptions)
 	}
 

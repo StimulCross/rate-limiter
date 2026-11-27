@@ -170,6 +170,48 @@ describe('HTTP Response Based', () => {
 		}
 	})
 
+	it('should prefer a strict High unblocked by probe feedback over an already ready Low', async () => {
+		const limiter = createLimiter({
+			priorityMode: 'strict',
+			limitBehavior: 'enqueue',
+			queue: { capacity: 2, concurrency: 2 },
+		})
+		const probe = Promise.withResolvers<HttpFeedback>()
+		const holdOther = Promise.withResolvers<null>()
+		const holdHigh = Promise.withResolvers<null>()
+		const probing = limiter.run(async () => await probe.promise, { key: 'A' })
+		const other = limiter.run(async () => await holdOther.promise, { key: 'B' })
+		const high = vi.fn(async () => await holdHigh.promise)
+		const low = vi.fn(() => null)
+		const waitingHigh = limiter.run(high, { key: 'A', priority: Priority.High })
+		const waitingLow = limiter.run(low, { key: 'C', priority: Priority.Low })
+		const settled = Promise.allSettled([probing, other, waitingHigh, waitingLow])
+
+		try {
+			expect(high).not.toHaveBeenCalled()
+			expect(low).not.toHaveBeenCalled()
+			const feedback = quota(1)
+			probe.resolve(feedback)
+			await expect(probing).resolves.toBe(feedback)
+
+			expect(high).toHaveBeenCalledOnce()
+			expect(low).not.toHaveBeenCalled()
+			await expect(limiter.getStatus('A')).resolves.toEqual({ status: 'known', remaining: 0, resetAt: 1000 })
+
+			holdHigh.resolve(null)
+			await expect(waitingHigh).resolves.toBeNull()
+			await expect(waitingLow).resolves.toBeNull()
+			expect(low).toHaveBeenCalledOnce()
+		}
+		finally {
+			probe.resolve(quota(1))
+			holdHigh.resolve(null)
+			holdOther.resolve(null)
+			await limiter.destroy()
+			await settled
+		}
+	})
+
 	it('should discard unused budget at reset and let only a new probe fund the next window', async () => {
 		const limiter = createLimiter()
 		await limiter.run(() => quota(3))

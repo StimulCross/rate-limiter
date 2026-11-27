@@ -1,4 +1,4 @@
-import type { FixedResultRateLimiter, RateLimiter } from '../../src/index.js'
+import type { FixedResultRateLimiter, PriorityMode, RateLimiter, RateLimiterOptions } from '../../src/index.js'
 import { describe, expect, expectTypeOf, it } from 'vitest'
 import { Priority, RateLimitError, RateLimitErrorCode } from '../../src/index.js'
 import { HttpResponseBasedLimiter } from '../../src/limiters/http-response-based/index.js'
@@ -38,6 +38,11 @@ describe('root entry point', () => {
 			Priority.High,
 			Priority.Highest,
 		]).toEqual([1, 2, 3, 4, 5])
+	})
+
+	it('should export PriorityMode for the shared instance option', () => {
+		expectTypeOf<PriorityMode>().toEqualTypeOf<'weighted' | 'strict'>()
+		expectTypeOf<RateLimiterOptions['priorityMode']>().toEqualTypeOf<PriorityMode | undefined>()
 	})
 
 	it('should expose rate limit rejections as errors with the given reason and retry delay', () => {

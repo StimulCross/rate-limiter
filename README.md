@@ -107,6 +107,15 @@ const client = createJsonClient(bucket)
 
 For an API that reports quota in response headers, pass its configured HTTP limiter to the same factory. For example, use `createJsonClient(twitchLimiter)` with the limiter from the [Twitch Helix example](#example-with-twitch-helix). Both options pass the raw `Response` through `run()`. The HTTP limiter reads the headers before the client parses the body.
 
+## Priority scheduling
+
+Set `priorityMode` when constructing a limiter. The package root exports the `PriorityMode` type. At each available slot, tasks with quota compete across keys, including eligible new arrivals. A key waiting for quota leaves work on other keys eligible.
+
+- **`weighted` (default)** uses class weights to share actual starts and protects the oldest waiter on each key after a weight-based number of bypasses on that key. The default weights are 1, 2, 4, 8, and 16 from `Priority.Lowest` through `Priority.Highest`. To customize the shares, pass `weights` with a positive finite value for each class.
+- **`strict`** starts the earliest submitted ready task in the highest ready class. FIFO within the class spans all ready keys and uses the original submission order when a key regains quota. Sustained higher-priority work can postpone lower-priority tasks indefinitely. Passing a defined `weights` value throws `RangeError` at construction.
+
+Both modes honor wait deadlines and cancellation.
+
 ## Choosing a limiter
 
 | Limiter                                           | Use it when                                                                               |
@@ -358,15 +367,16 @@ Time-based limiters report `nextAvailableAt` (an epoch timestamp in milliseconds
 
 ### Instance options
 
-| Option              | Behavior                                                                                                                                                                                                                            |
-| ------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `limitBehavior`     | Defaults to `'reject'`. Set `'enqueue'` to allow waiting and provide an explicit `queue.capacity`.                                                                                                                                  |
-| `queue.capacity`    | Maximum number of waiting callbacks across all keys. Use `0` to allow only immediate starts.                                                                                                                                        |
-| `queue.concurrency` | Maximum number of running callbacks across all keys. Defaults to unlimited.                                                                                                                                                         |
-| `queue.maxWaitMs`   | Maximum time a callback may wait to start. Defaults to unlimited.                                                                                                                                                                   |
-| `weights`           | Relative shares for eligible work in the five priority classes. Defaults to `1`, `2`, `4`, `8`, and `16` from `Priority.Lowest` through `Priority.Highest`. Supply a positive finite weight for each class to customize the shares. |
-| `idGenerator`       | Supplies a diagnostic ID for each task submitted without one.                                                                                                                                                                       |
-| `loggerOptions`     | Defaults to `minLevel: 'warning'`. Use `'debug'` for starts, queue entries, and rejections, or `'verbose'` for more scheduling detail. Set `includeIdentifiers: true` only if task IDs and keys are safe to log.                    |
+| Option              | Behavior                                                                                                                                                                                                         |
+| ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `limitBehavior`     | Defaults to `'reject'`. Set `'enqueue'` to allow waiting and provide an explicit `queue.capacity`.                                                                                                               |
+| `queue.capacity`    | Maximum number of waiting callbacks across all keys. Use `0` to allow only immediate starts.                                                                                                                     |
+| `queue.concurrency` | Maximum number of running callbacks across all keys. Defaults to unlimited.                                                                                                                                      |
+| `queue.maxWaitMs`   | Maximum time a callback may wait to start. Defaults to unlimited.                                                                                                                                                |
+| `priorityMode`      | Instance-wide scheduling mode. Defaults to `'weighted'`. See [Priority scheduling](#priority-scheduling).                                                                                                        |
+| `weights`           | Optional weights for all five classes in weighted mode. A defined value in strict mode throws `RangeError`.                                                                                                      |
+| `idGenerator`       | Supplies a diagnostic ID for each task submitted without one.                                                                                                                                                    |
+| `loggerOptions`     | Defaults to `minLevel: 'warning'`. Use `'debug'` for starts, queue entries, and rejections, or `'verbose'` for more scheduling detail. Set `includeIdentifiers: true` only if task IDs and keys are safe to log. |
 
 Quota timestamps use Unix epoch time from `Date.now()`. Queue deadlines use monotonic time from `performance.now()`. When migrating, remove custom clock options (`clock`, `quotaClock`, or `waitingClock`) and imports of the `Clock` type.
 

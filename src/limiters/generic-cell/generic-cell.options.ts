@@ -1,4 +1,3 @@
-import type { PriorityWeights } from '../../contracts/priority-weights.js'
 import type { RateLimiterOptions } from '../../contracts/rate-limiter-options.js'
 
 /**
@@ -32,11 +31,4 @@ export interface GenericCellOptions extends RateLimiterOptions {
 	 * Each start must pass every profile for its key.
 	 */
 	limitOptions: GenericCellLimitOptions | readonly GenericCellLimitOptions[]
-
-	/**
-	 * Weights for global scheduling across keys.
-	 *
-	 * Defaults to `1`, `2`, `4`, `8`, and `16` from lowest to highest priority.
-	 */
-	weights?: PriorityWeights
 }

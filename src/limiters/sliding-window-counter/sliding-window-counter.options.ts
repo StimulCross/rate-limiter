@@ -1,4 +1,3 @@
-import type { PriorityWeights } from '../../contracts/priority-weights.js'
 import type { RateLimiterOptions } from '../../contracts/rate-limiter-options.js'
 
 /**
@@ -37,11 +36,4 @@ export interface SlidingWindowCounterOptions extends RateLimiterOptions {
 	 * The horizon applied independently to each key.
 	 */
 	limitOptions: SlidingWindowCounterLimitOptions
-
-	/**
-	 * Weights for global scheduling across keys.
-	 *
-	 * Defaults to `1`, `2`, `4`, `8`, and `16` from lowest to highest priority.
-	 */
-	weights?: PriorityWeights
 }

@@ -1,5 +1,6 @@
 export type { IdGenerator } from './contracts/id-generator.js'
 export type { LimitBehavior } from './contracts/limit-behavior.js'
+export type { PriorityMode } from './contracts/priority-mode.js'
 export type { PriorityWeights } from './contracts/priority-weights.js'
 export { Priority } from './contracts/priority.js'
 export type { RateLimiterLoggerOptions, RateLimiterOptions } from './contracts/rate-limiter-options.js'

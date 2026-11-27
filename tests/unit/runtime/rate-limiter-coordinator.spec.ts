@@ -5,7 +5,7 @@ import { Priority, RateLimitErrorCode } from '../../../src/index.js'
 import { FixedWindowPolicy } from '../../../src/limiters/fixed-window/fixed-window.policy.js'
 import { RateLimiterCoordinator } from '../../../src/runtime/rate-limiter-coordinator.js'
 
-function createCoordinator(
+function createCoordinatorWithClocks(
 	options?: ConstructorParameters<typeof RateLimiterCoordinator<FixedWindowState, FixedWindowStatus>>[1],
 	profiles: readonly FixedWindowLimitOptions[] = [
 		{ limit: 1, windowMs: 1000 },
@@ -25,7 +25,14 @@ function createCoordinator(
 	return { clock, coordinator }
 }
 
-describe('RateLimiterCoordinator', () => {
+describe.each(['weighted', 'strict'] as const)('RateLimiterCoordinator %s', priorityMode => {
+	function createCoordinator(
+		options?: Parameters<typeof createCoordinatorWithClocks>[0],
+		profiles?: Parameters<typeof createCoordinatorWithClocks>[1],
+	) {
+		return createCoordinatorWithClocks({ ...options, priorityMode }, profiles)
+	}
+
 	it.each([
 		0,
 		-1,
@@ -95,6 +102,7 @@ describe('RateLimiterCoordinator', () => {
 		const coordinator = new RateLimiterCoordinator(new FixedWindowPolicy([
 			{ limit: 1, windowMs: 1000 },
 		]), {
+			priorityMode,
 			idGenerator: () => {
 				now = 10
 

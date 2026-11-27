@@ -145,46 +145,199 @@ describe('Fixed Window public entry point', () => {
 		expect(observed.profiles[0]?.used).toBe(1)
 	})
 
-	it('should honor custom weights and preserve diagnostic ids without conflating tasks', async () => {
-		vi.setSystemTime(0)
-		const generateId = vi.fn(() => 'duplicate')
-		const limiter = new FixedWindowLimiter({
-			limitOptions: { limit: 1, windowMs: 100 },
-			limitBehavior: 'enqueue',
-			queue: { capacity: 2, concurrency: 1 },
-			idGenerator: generateId,
-			weights: {
-				[Priority.Lowest]: 1,
-				[Priority.Low]: 3,
-				[Priority.Normal]: 1,
-				[Priority.High]: 1,
-				[Priority.Highest]: 1,
-			},
+	describe('weighted scheduling', () => {
+		it.each([{}, { priorityMode: 'weighted' }] satisfies RateLimiterOptions[])('should apply the default weighted start shares with options %j', async options => {
+			vi.setSystemTime(0)
+			const limiter = new FixedWindowLimiter({
+				...options,
+				limitOptions: { limit: 6, windowMs: 100 },
+				limitBehavior: 'enqueue',
+				queue: { capacity: 6, concurrency: 1 },
+			})
+			const hold = Promise.withResolvers<undefined>()
+			const running = limiter.run(async () => await hold.promise, { key: 'active' })
+			const order: Priority[] = []
+			const waiting = [
+				Priority.Low,
+				Priority.Low,
+				Priority.High,
+				Priority.High,
+				Priority.High,
+				Priority.High,
+			].map(async priority => await limiter.run(() => order.push(priority), { key: String(priority), priority }))
+
+			hold.resolve(undefined)
+			await Promise.all([running, ...waiting])
+
+			expect(order).toEqual([
+				Priority.High,
+				Priority.High,
+				Priority.Low,
+				Priority.High,
+				Priority.High,
+				Priority.Low,
+			])
 		})
-		const startOrder: string[] = []
-		const release = Promise.withResolvers<undefined>()
-		const running = limiter.run(async () => await release.promise, { key: 'active', id: 'explicit' })
-		const high = limiter.run(() => startOrder.push('high'), { key: 'high', priority: Priority.High })
-		const low = limiter.run(() => startOrder.push('low'), { key: 'low', priority: Priority.Low })
-		expect(generateId).toHaveBeenCalledTimes(2)
 
-		const blocked = vi.fn()
+		it.each([{}, { priorityMode: 'weighted' }] satisfies RateLimiterOptions[])('should honor custom weights and preserve diagnostic ids with options %j', async options => {
+			vi.setSystemTime(0)
+			const generateId = vi.fn(() => 'duplicate')
+			const limiter = new FixedWindowLimiter({
+				...options,
+				limitOptions: { limit: 1, windowMs: 100 },
+				limitBehavior: 'enqueue',
+				queue: { capacity: 2, concurrency: 1 },
+				idGenerator: generateId,
+				weights: {
+					[Priority.Lowest]: 1,
+					[Priority.Low]: 3,
+					[Priority.Normal]: 1,
+					[Priority.High]: 1,
+					[Priority.Highest]: 1,
+				},
+			})
+			const startOrder: string[] = []
+			const release = Promise.withResolvers<undefined>()
+			const running = limiter.run(async () => await release.promise, { key: 'active', id: 'explicit' })
+			const high = limiter.run(() => startOrder.push('high'), { key: 'high', priority: Priority.High })
+			const low = limiter.run(() => startOrder.push('low'), { key: 'low', priority: Priority.Low })
+			expect(generateId).toHaveBeenCalledTimes(2)
 
-		await expect(limiter.run(blocked, { key: 'other' })).rejects.toMatchObject({
-			code: RateLimitErrorCode.QueueOverflow,
-			id: 'duplicate',
+			const blocked = vi.fn()
+
+			await expect(limiter.run(blocked, { key: 'other' })).rejects.toMatchObject({
+				code: RateLimitErrorCode.QueueOverflow,
+				id: 'duplicate',
+			})
+
+			expect(blocked).not.toHaveBeenCalled()
+			release.resolve(undefined)
+			await Promise.all([running, high, low])
+			expect(startOrder).toEqual(['low', 'high'])
+
+			await limiter.destroy()
+
+			await expect(limiter.run(blocked, { id: 'closed' })).rejects.toMatchObject({
+				code: RateLimitErrorCode.Destroyed,
+				id: 'closed',
+			})
+		})
+	})
+
+	describe('strict priority selection', () => {
+		function createLimiter(capacity: number) {
+			return new FixedWindowLimiter({
+				priorityMode: 'strict',
+				limitOptions: { limit: 1, windowMs: 100 },
+				limitBehavior: 'enqueue',
+				queue: { capacity, concurrency: 1 },
+			})
+		}
+
+		beforeEach(() => {
+			vi.useFakeTimers({ now: 0 })
 		})
 
-		expect(blocked).not.toHaveBeenCalled()
-		release.resolve(undefined)
-		await Promise.all([running, high, low])
-		expect(startOrder).toEqual(['low', 'high'])
+		it('should reject defined weights at construction and allow undefined weights', async () => {
+			const options: FixedWindowOptions = {
+				limitOptions: { limit: 1, windowMs: 100 },
+				priorityMode: 'strict',
+			}
 
-		await limiter.destroy()
+			expect(() => new FixedWindowLimiter({
+				...options,
+				weights: {
+					[Priority.Lowest]: 1,
+					[Priority.Low]: 1,
+					[Priority.Normal]: 1,
+					[Priority.High]: 1,
+					[Priority.Highest]: 1,
+				},
+			})).toThrow(RangeError)
 
-		await expect(limiter.run(blocked, { id: 'closed' })).rejects.toMatchObject({
-			code: RateLimitErrorCode.Destroyed,
-			id: 'closed',
+			const limiter = new FixedWindowLimiter({ ...options, weights: undefined })
+			await expect(limiter.run(() => 'started')).resolves.toBe('started')
+		})
+
+		it('should start Low on a ready key while High waits for quota and prefer High once ready', async () => {
+			const limiter = createLimiter(2)
+			await limiter.run(() => {}, { key: 'A' })
+
+			const order: string[] = []
+			const high = limiter.run(() => order.push('High A'), { key: 'A', priority: Priority.High })
+			const hold = Promise.withResolvers<undefined>()
+			const running = limiter.run(async () => {
+				order.push('Low B')
+				await hold.promise
+			}, { key: 'B', priority: Priority.Low, maxWaitMs: 0 })
+			const low = limiter.run(() => order.push('Low C'), { key: 'C', priority: Priority.Low })
+
+			expect(order).toEqual(['Low B'])
+			await vi.advanceTimersByTimeAsync(100)
+			expect(order).toEqual(['Low B'])
+
+			hold.resolve(undefined)
+			await Promise.all([high, running, low])
+			expect(order).toEqual(['Low B', 'High A', 'Low C'])
+		})
+
+		it('should preserve cross-key FIFO when the older High regains quota after the younger High was ready', async () => {
+			const limiter = createLimiter(2)
+			await limiter.run(() => {}, { key: 'A' })
+
+			const hold = Promise.withResolvers<undefined>()
+			const running = limiter.run(async () => await hold.promise, { key: 'active' })
+			const order: string[] = []
+			const older = limiter.run(() => order.push('A'), { key: 'A', priority: Priority.High })
+			const younger = limiter.run(() => order.push('B'), { key: 'B', priority: Priority.High })
+
+			await vi.advanceTimersByTimeAsync(100)
+			expect(order).toEqual([])
+			hold.resolve(undefined)
+			await Promise.all([running, older, younger])
+			expect(order).toEqual(['A', 'B'])
+		})
+
+		it('should start a quota-ready zero-wait High synchronously over a due Low at full capacity', async () => {
+			const limiter = createLimiter(1)
+			await limiter.run(() => {}, { key: 'A' })
+			const low = vi.fn(() => 'older')
+			const waiting = limiter.run(low, { key: 'A', priority: Priority.Low })
+
+			// Make A due without executing its pending wakeup callback.
+			vi.setSystemTime(100)
+			const hold = Promise.withResolvers<string>()
+			const high = vi.fn(async () => await hold.promise)
+			const immediate = limiter.run(high, { key: 'B', priority: Priority.High, maxWaitMs: 0 })
+
+			expect(high).toHaveBeenCalledOnce()
+			expect(low).not.toHaveBeenCalled()
+			const statusB = await limiter.getStatus('B')
+			const statusA = await limiter.getStatus('A')
+			expect(statusB.profiles[0]?.used).toBe(1)
+			expect(statusA.profiles[0]?.used).toBe(0)
+			hold.resolve('immediate')
+			await expect(immediate).resolves.toBe('immediate')
+			await expect(waiting).resolves.toBe('older')
+		})
+
+		it('should reject a younger zero-wait High at full capacity without charging its key', async () => {
+			const limiter = createLimiter(1)
+			await limiter.run(() => {}, { key: 'A' })
+			const older = vi.fn(() => 'older')
+			const waiting = limiter.run(older, { key: 'A', priority: Priority.High })
+
+			vi.setSystemTime(100)
+			const younger = vi.fn(() => 'younger')
+			const immediate = limiter.run(younger, { key: 'B', priority: Priority.High, maxWaitMs: 0 })
+
+			expect(older).toHaveBeenCalledOnce()
+			expect(younger).not.toHaveBeenCalled()
+			await expect(immediate).rejects.toMatchObject({ code: RateLimitErrorCode.LimitExceeded })
+			await expect(waiting).resolves.toBe('older')
+			const status = await limiter.getStatus('B')
+			expect(status.profiles[0]?.used).toBe(0)
+			await expect(limiter.run(younger, { key: 'B', maxWaitMs: 0 })).resolves.toBe('younger')
 		})
 	})
 
